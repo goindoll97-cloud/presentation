@@ -103,6 +103,10 @@ GITHUB_RAW_BASE = os.getenv(
 PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 USER_AGENT = "study2-identity-benchmark/4.2-structure-first"
 PAUSE = float(os.getenv("STUDY2_PUBCHEM_PAUSE_SEC", "0.40"))
+# Server-expensive calls (word search, fast* structure search, multi-CID batches,
+# E-utilities elink) get a wider gap; PubChem answers these with 503 +
+# Retry-After when they arrive back-to-back with other traffic.
+HEAVY_PAUSE = float(os.getenv("STUDY2_PUBCHEM_HEAVY_PAUSE_SEC", "2.0"))
 PUBCHEM_RETRIES = int(os.getenv("STUDY2_PUBCHEM_RETRIES", "8"))
 PUBCHEM_BACKOFF_MAX = float(os.getenv("STUDY2_PUBCHEM_BACKOFF_MAX_SEC", "60"))
 _LAST_PUBCHEM_REQUEST_AT = 0.0
@@ -517,16 +521,28 @@ def download_if_missing(filename: str, candidates: list[Path]) -> Optional[Path]
 
 
 
-def _pubchem_wait_before_request() -> None:
+def _is_heavy_request(url: str) -> bool:
+    """True for request types that are expensive on the PubChem/NCBI side."""
+    if url.startswith(EUTILS):
+        return True
+    if "name_type=word" in url or "/fast" in url:
+        return True
+    m = re.search(r"/compound/cid/([^/]+)/", url)
+    return bool(m and "," in m.group(1))
+
+
+def _pubchem_wait_before_request(url: str = "") -> None:
     """Globally pace PUG-REST calls in this single-process script.
 
     Default interval is 0.40 s (~2.5 req/s), intentionally below PubChem's
     published 5 req/s ceiling because each candidate can trigger several
     dependent requests and dynamic throttling can become stricter under load.
+    Heavy requests (see _is_heavy_request) wait HEAVY_PAUSE instead.
     """
     global _LAST_PUBCHEM_REQUEST_AT
+    pause = max(PAUSE, HEAVY_PAUSE) if _is_heavy_request(url) else PAUSE
     now = time.monotonic()
-    wait = PAUSE - (now - _LAST_PUBCHEM_REQUEST_AT)
+    wait = pause - (now - _LAST_PUBCHEM_REQUEST_AT)
     if wait > 0:
         time.sleep(wait)
     _LAST_PUBCHEM_REQUEST_AT = time.monotonic()
@@ -547,6 +563,34 @@ def _retry_delay(attempt: int, err: HTTPError | None = None) -> float:
     return min(PUBCHEM_BACKOFF_MAX, base + random.uniform(0.0, 0.8))
 
 
+def _short_url(url: str, limit: int = 140) -> str:
+    u = url.replace(PUBCHEM, "PUG").replace(EUTILS, "EUTILS")
+    return u if len(u) <= limit else u[: limit - 3] + "..."
+
+
+def _http_error_detail(e: HTTPError) -> str:
+    """Throttling header + first part of the error body, for retry logs."""
+    parts = []
+    try:
+        throttle = e.headers.get("X-Throttling-Control")
+        if throttle:
+            parts.append(f"throttle=[{throttle}]")
+        ra = e.headers.get("Retry-After")
+        if ra:
+            parts.append(f"retry_after={ra}")
+    except Exception:
+        pass
+    try:
+        body = e.read(400).decode("utf-8", "replace")
+        body = re.sub(r"<[^>]+>", " ", body)
+        body = re.sub(r"\s+", " ", body).strip()[:160]
+        if body:
+            parts.append(f"body={body!r}")
+    except Exception:
+        pass
+    return "; ".join(parts)
+
+
 def cached_json(url: str, retries: int = PUBCHEM_RETRIES) -> Optional[dict]:
     key = hashlib.sha256(url.encode("utf-8")).hexdigest()
     fp = CACHE / f"{key}.json"
@@ -559,7 +603,7 @@ def cached_json(url: str, retries: int = PUBCHEM_RETRIES) -> Optional[dict]:
     last = None
     for attempt in range(max(1, retries)):
         try:
-            _pubchem_wait_before_request()
+            _pubchem_wait_before_request(url)
             req = Request(
                 url,
                 headers={
@@ -584,9 +628,11 @@ def cached_json(url: str, retries: int = PUBCHEM_RETRIES) -> Optional[dict]:
                 return None
             if e.code in {429, 500, 502, 503, 504}:
                 delay = _retry_delay(attempt, e)
+                detail = _http_error_detail(e)
                 print(
                     f"[PUBCHEM RETRY {attempt+1}/{retries}] HTTP {e.code}; "
-                    f"sleep {delay:.1f}s"
+                    f"sleep {delay:.1f}s; url={_short_url(url)}"
+                    + (f"\n    {detail}" if detail else "")
                 )
                 time.sleep(delay)
                 continue
@@ -596,8 +642,8 @@ def cached_json(url: str, retries: int = PUBCHEM_RETRIES) -> Optional[dict]:
             last = e
             delay = _retry_delay(attempt, None)
             print(
-                f"[PUBCHEM RETRY {attempt+1}/{retries}] {type(e).__name__}; "
-                f"sleep {delay:.1f}s"
+                f"[PUBCHEM RETRY {attempt+1}/{retries}] {type(e).__name__}: {e}; "
+                f"sleep {delay:.1f}s; url={_short_url(url)}"
             )
             time.sleep(delay)
 
@@ -1388,7 +1434,7 @@ def main() -> None:
 
     print("=" * 94)
     print("04A V4.2 / RATE-SAFE AUTO-BUILD + STRUCTURE-QC BROAD-SALT BENCHMARK (PUBCHEM ONLY; NO CLAUDE)")
-    print(f"PubChem pacing: {PAUSE:.2f}s/request; retries={PUBCHEM_RETRIES}; backoff_max={PUBCHEM_BACKOFF_MAX:.0f}s")
+    print(f"PubChem pacing: {PAUSE:.2f}s/request (heavy: {max(PAUSE, HEAVY_PAUSE):.2f}s); retries={PUBCHEM_RETRIES}; backoff_max={PUBCHEM_BACKOFF_MAX:.0f}s")
     print("=" * 94)
 
     rule_path = download_if_missing("broad_salt_rules.csv", [DATA / "broad_salt_rules.csv", ENGINE_DATA / "broad_salt_rules.csv", ROOT / "broad_salt_rules.csv"])
