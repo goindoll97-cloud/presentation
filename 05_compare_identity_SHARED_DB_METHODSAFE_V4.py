@@ -85,7 +85,7 @@ RUNTIME_SUMMARY_FILE = INTERMEDIATE / "05_identity_runtime_summary.csv"
 RUNTIME_BATCH_FILE = INTERMEDIATE / "05_identity_runtime_batch_wall.csv"
 RUNTIME_PPT_FILE = INTERMEDIATE / "05_identity_runtime_ppt_operational.csv"
 PROMPT_VERSION = "study2-chemical-identity-v1-20260911"
-DB_PROMPT_VERSION = "study2-shared-pubchem-v2-20260929"
+DB_PROMPT_VERSION = "study2-shared-pubchem-v3-no-cas-leakage-20260930"
 STRUCTURE_PROMPT_VERSION = "study2-structure-blinded-v2-20260911"
 CACHE_VERSION = "claude-structured-identity-v1"
 
@@ -459,7 +459,6 @@ def prompt_for(row: pd.Series, condition: str) -> str:
     if condition == "DB_INFORMED":
         base = {
             "case_id": clean(row.get("case_id")),
-            "candidate_cas": clean(row.get("candidate_cas")),
             "candidate_pubchem_smiles": clean(row.get("operational_resolved_smiles")),
             "candidate_structure_status": clean(row.get("operational_structure_status")),
             "reference_parent_smiles": clean(row.get("reference_parent_smiles")),
@@ -934,6 +933,7 @@ def main() -> None:
             "input_condition": "DB_INFORMED",
             "candidate_structure_status": clean(r.get("operational_structure_status")),
             "candidate_pubchem_cid": clean(r.get("operational_pubchem_cid")),
+            "paid_api_eligible": clean(r.get("operational_structure_status")) == "PUBCHEM_EXACT_CAS_VERIFIED",
             "prompt_sha256": hashlib.sha256(ptxt.encode("utf-8")).hexdigest(),
             "prompt_text": ptxt,
         })
@@ -942,13 +942,17 @@ def main() -> None:
 
     readiness = _load_readiness()
     n_cases = int(len(manifest))
-    planned_calls = int(n_cases * N_REPEATS)
+    n_paid_api_cases = int(manifest["paid_api_eligible"].astype(bool).sum()) if "paid_api_eligible" in manifest.columns else n_cases
+    n_db_unresolved_no_call = int(n_cases - n_paid_api_cases)
+    planned_calls = int(n_paid_api_cases * N_REPEATS)
     api_plan = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "execute_claude": EXECUTE_CLAUDE,
         "benchmark_ready": bool(readiness.get("ready_for_claude_api", False)),
         "failed_readiness_checks": readiness.get("failed_checks", []),
         "n_cases": n_cases,
+        "n_paid_api_cases": n_paid_api_cases,
+        "n_db_unresolved_no_call": n_db_unresolved_no_call,
         "n_repeats": N_REPEATS,
         "planned_paid_claude_calls": planned_calls,
         "additional_hybrid_calls": 0,
@@ -963,7 +967,9 @@ def main() -> None:
     API_PLAN_FILE.write_text(json.dumps(api_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"\nShared-DB cases prepared: {n_cases}")
-    print(f"Planned Claude calls if enabled: {planned_calls} (= {n_cases} cases × {N_REPEATS} repeats)")
+    print(f"Paid-API eligible cases (exact CAS resolved): {n_paid_api_cases}")
+    print(f"DB-unresolved cases auto-REVIEW without Claude call: {n_db_unresolved_no_call}")
+    print(f"Planned Claude calls if enabled: {planned_calls} (= {n_paid_api_cases} cases × {N_REPEATS} repeats)")
     print("Hybrid additional paid calls: 0")
     print(f"Prompt manifest: {PROMPT_MANIFEST_FILE}")
     print(f"RDKit preflight: {RDKIT_PREFLIGHT_FILE}")
@@ -989,9 +995,35 @@ def main() -> None:
     print(f"\nClaude model: {ANTHROPIC_MODEL} | repeats={N_REPEATS} | workers={WORKERS}")
     print("Condition: DB_INFORMED only (same PubChem structure information used by RDKit)")
     llm_rows, batch_runtime_rows = [], []
-    records = bench[bench["operational_cas_eligible"]].to_dict("records")
+    op_rows = bench[bench["operational_cas_eligible"]].copy()
+    paid_rows = op_rows[op_rows["operational_structure_status"].eq("PUBCHEM_EXACT_CAS_VERIFIED")].copy()
+    unresolved_rows = op_rows[~op_rows["operational_structure_status"].eq("PUBCHEM_EXACT_CAS_VERIFIED")].copy()
+    records = paid_rows.to_dict("records")
+
     for rep in range(1, N_REPEATS + 1):
-        print(f"\n[DB_INFORMED] repeat {rep}/{N_REPEATS} | n={len(records)}")
+        # Fair shared-DB gate: if PubChem cannot resolve one exact candidate structure,
+        # neither Claude nor RDKit is allowed to infer identity from memorized CAS/name knowledge.
+        # These rows remain REVIEW with zero paid API calls.
+        for _, r in unresolved_rows.iterrows():
+            llm_rows.append({
+                "case_id": clean(r.get("case_id")),
+                "identity_benchmark_id": clean(r.get("identity_benchmark_id")),
+                "input_condition": "DB_INFORMED",
+                "llm_model": ANTHROPIC_MODEL,
+                "repeat": rep,
+                "decision": "REVIEW",
+                "classification_valid": False,
+                "reason": "SHARED_DB_UNRESOLVED_NO_MODEL_CALL",
+                "confidence": "LOW",
+                "call_status": "DB_UNRESOLVED_NO_CALL",
+                "model_returned": "",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "elapsed_sec": 0.0,
+                "runtime_source": "NO_API_CALL_DB_UNRESOLVED",
+            })
+
+        print(f"\n[DB_INFORMED] repeat {rep}/{N_REPEATS} | paid n={len(records)} | auto-REVIEW n={len(unresolved_rows)}")
         batch_t0 = time.perf_counter(); done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futs = {ex.submit(run_one_llm, row, "DB_INFORMED", rep): row for row in records}
@@ -999,13 +1031,14 @@ def main() -> None:
                 llm_rows.append(fut.result()); done += 1
                 if done % 10 == 0 or done == len(records):
                     elapsed = max(0.001, time.perf_counter() - batch_t0)
-                    print(f"  {done}/{len(records)} | {elapsed/done:.1f} wall-s/completed-case")
+                    print(f"  {done}/{len(records)} | {elapsed/done:.1f} wall-s/completed-paid-case")
         batch_wall = float(time.perf_counter() - batch_t0)
         batch_runtime_rows.append({
             "system": "CLAUDE_DB", "setting": "OPERATIONAL_SHARED_DB", "repeat": rep,
-            "n_cases": len(records), "workers": WORKERS, "batch_wall_sec": batch_wall,
+            "n_cases": len(records), "n_auto_review_no_call": len(unresolved_rows),
+            "workers": WORKERS, "batch_wall_sec": batch_wall,
             "wall_sec_per_case": batch_wall / max(1, len(records)),
-            "note": "Actual batch wall time for the single paid Claude+DB arm.",
+            "note": "Actual batch wall time for paid Claude+DB calls only; DB-unresolved rows are auto-REVIEW without model calls.",
         })
 
     llm = pd.DataFrame(llm_rows)
@@ -1279,10 +1312,12 @@ def main() -> None:
         "primary_systems": ["CLAUDE_DB", "RDKIT_CAS_LOOKUP", "HYBRID_OPERATIONAL"],
         "sensitivity_systems": ["RDKIT_V43_SENSITIVITY", "HYBRID_V43_SENSITIVITY"],
         "systems": ["CLAUDE_DB", "RDKIT_CAS_LOOKUP", "HYBRID_OPERATIONAL", "RDKIT_V43_SENSITIVITY", "HYBRID_V43_SENSITIVITY"],
-        "shared_db_definition": "One exact-CAS-verified PubChem resolution shared by all systems.",
+        "shared_db_definition": "One exact-CAS-verified PubChem resolution shared by all systems; unresolved/multi-CID DB rows are auto-REVIEW for both model families.",
         "hybrid_policy": "Frozen RDKit primary; reuse same case/repeat Claude+DB result only when RDKit returns REVIEW.",
         "v43_status": "POST_PREFLIGHT_SENSITIVITY_ONLY_NOT_PRIMARY_INFERENCE",
         "additional_paid_hybrid_calls": 0,
+        "claude_cas_identifier_withheld": True,
+        "db_unresolved_policy": "AUTO_REVIEW_NO_CLAUDE_CALL",
         "closed_llm_removed": True,
         "controlled_structure_claude_removed": True,
         "reference_type": "source-supported chemical identity operational reference; not expert legal gold",
