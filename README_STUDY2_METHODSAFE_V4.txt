@@ -24,8 +24,10 @@ B. SECONDARY_STRUCTURE_ANCHORED
    - SECONDARY coverage/stress set, not unbiased RDKit-performance estimate
 
 The two sets overlap in 37 rule/CAS pairs. Step 04C creates 157 unique identity
-questions (156 CAS-operational), so Claude is called once per unique case and the
-same result is mapped back to both benchmark sets.
+questions (156 CAS-operational). In the final fair shared-DB design, Claude is
+called only when PubChem resolves the CAS to one exact verified candidate structure.
+DB-unresolved/multi-CID rows are retained in the denominator as REVIEW without a
+Claude call, and the same case/repeat result is reused by Hybrid.
 
 Stereochemistry sensitivity
 ----------------------------
@@ -79,7 +81,8 @@ Run order
    python .\05_compare_identity_SHARED_DB_METHODSAFE_V4.py
 
    Expected planned Claude calls if repeats=3:
-   156 x 3 = 468
+   147 exact-CAS-resolved cases x 3 = 441 paid Claude calls
+   9 PubChem multi-CID/unresolved evaluation rows = automatic REVIEW, no Claude call
    Hybrid additional paid calls = 0
    V4.3 sensitivity additional paid calls = 0
 
