@@ -26,6 +26,9 @@ Equal-information rules
 - the same generic salt policy is written in the LLM prompt and implemented in RDKit;
 - no compound-specific RDKit exception is allowed;
 - unresolved PubChem cases remain REVIEW for all systems.
+- a failed Claude API call is never scored as REVIEW: Step 05 makes one preflight
+  call before the batch and stops without scoring if any call fails (rerun retries
+  only the failed calls; successful calls are cached).
 
 Salt-aware V5 deterministic policy
 ----------------------------------
@@ -34,6 +37,9 @@ Salt-aware V5 deterministic policy
 - support stoichiometric duplicate parent fragments;
 - recognize generic acid/base counterion relations, including phenol/phenolate;
 - recognize chemically compatible cations/anions and neutral-drawn acid/base pairs;
+- recognize PubChem-style neutral drawings of counterions: hydrohalic, nitric and
+  other inorganic oxoacids drawn neutral (e.g. HCl as "Cl") for basic parents, and
+  lone neutral metal atoms (e.g. "[Na]") for acidic parents (added in V5.1);
 - allow common solvate fragments;
 - covalent derivatives/analogs without the same parent fragment are NO_MATCH;
 - unexplained components are REVIEW;
