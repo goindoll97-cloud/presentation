@@ -56,7 +56,7 @@ def main() -> None:
         "generic_self_tests": tests,
         "confirmatory_requirement": (
             "Construct/curate the final holdout only after this protocol freeze, then freeze the exact holdout bytes with Step 04E before any Step-05 evaluation. "
-            "The final holdout must not have been used to design/tune the engine or prompt and must be candidate-CAS-disjoint from development data."
+            "The final holdout must not have been used to design/tune the engine or prompt, must be candidate-CAS-disjoint and reference-parent-disjoint from development data, and must carry an explicit isomer_scope for every row."
         ),
         "current_60_and_134_case_sets_status": "DEVELOPMENT_OR_EXPLORATORY_ONLY_AFTER_V5_METHOD_REFINEMENT",
     }
