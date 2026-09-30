@@ -17,8 +17,8 @@ except Exception:  # pragma: no cover
     Chem = None
     rdMolStandardize = None
 
-ENGINE_VERSION = "V5.0_FAIR_SALT_AWARE_FROZEN_2026-09-30"
-POLICY_VERSION = "parent-salt-policy-v5.0"
+ENGINE_VERSION = "V5.1_FAIR_SALT_AWARE_FROZEN_2026-09-30"
+POLICY_VERSION = "parent-salt-policy-v5.1"
 
 # Generic chemistry classes only. No benchmark-compound-specific SMARTS or CAS rules.
 _ACID_SMARTS = [
@@ -33,6 +33,21 @@ _BASE_SMARTS = [
     "[nX2;+0]",                                  # pyridine-like aromatic N
     "[nH+]",                                     # protonated aromatic N
 ]
+# Neutral-drawn inorganic acids as PubChem writes them for salts (HCl -> "Cl",
+# nitric acid -> "[N+](=O)(O)[O-]", perchloric acid -> "OCl(=O)(=O)=O", ...).
+# Used ONLY to classify counterion fragments, never to classify the parent.
+_MINERAL_ACID_SMARTS = [
+    "[F,Cl,Br,I;X0,X1;+0]",               # hydrohalic acid drawn as a lone halogen
+    "[OX2H1][!#6;!#1]=O",                 # inorganic oxoacid X(=O)OH (S, P, ...)
+    "[OX2H1][!#6;!#1;!+0][OX1-]",        # same, charge-separated (RDKit perchloric acid)
+    "[OX2H1][N+](=O)[O-]",                # nitric acid, charge-separated
+    "[OX2H1][N](=O)=O",                   # nitric acid, pentavalent drawing
+]
+# Elements that are NOT metals; any other lone atom is treated as a metal atom.
+_NONMETALS = {
+    "H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar",
+    "As", "Se", "Br", "Kr", "Te", "I", "Xe", "At", "Rn",
+}
 _COMMON_SOLVATES = {
     "O", "CO", "CCO", "CC(C)O", "CC(=O)C", "CC#N", "O=C=O",
     "CS(=O)C", "C1COCCO1",
@@ -67,6 +82,7 @@ def _compile(smarts_list: Iterable[str]):
 
 _ACID_MOLS = _compile(_ACID_SMARTS)
 _BASE_MOLS = _compile(_BASE_SMARTS)
+_MINERAL_ACID_MOLS = _compile(_MINERAL_ACID_SMARTS)
 
 
 def _standardize_fragment(mol):
@@ -138,6 +154,31 @@ def _net_charge(mol) -> int:
         return 0
 
 
+def _is_mineral_acid(mol) -> bool:
+    """Neutral-drawn inorganic acid fragment (only meaningful for counterions).
+
+    Carbon-containing fragments are excluded so that e.g. a chlorinated organic
+    co-component is never mistaken for hydrogen chloride.
+    """
+    if mol is None or any(a.GetAtomicNum() == 6 for a in mol.GetAtoms()):
+        return False
+    for q in _MINERAL_ACID_MOLS:
+        try:
+            if mol.HasSubstructMatch(q):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_neutral_metal_atom(mol) -> bool:
+    """A lone, uncharged metal atom, e.g. sodium drawn as "[Na]" instead of "[Na+]"."""
+    if mol is None or mol.GetNumAtoms() != 1:
+        return False
+    a = mol.GetAtomWithIdx(0)
+    return a.GetFormalCharge() == 0 and a.GetSymbol() not in _NONMETALS
+
+
 def _is_solvate(mol) -> bool:
     m = _standardize_fragment(mol)
     if m is None:
@@ -166,12 +207,14 @@ def _companion_class(mol, ref_is_acid: bool, ref_is_base: bool) -> tuple[bool, s
     if ref_is_acid:
         if q > 0:
             return True, "CATION_COUNTERION"
+        if _is_neutral_metal_atom(mol):
+            return True, "NEUTRAL_DRAWN_METAL_COUNTERION"
         if _is_base(mol):
             return True, "NEUTRAL_DRAWN_BASE_COUNTERION"
     if ref_is_base:
         if q < 0:
             return True, "ANION_COUNTERION"
-        if _is_acid(mol):
+        if _is_acid(mol) or _is_mineral_acid(mol):
             return True, "NEUTRAL_DRAWN_ACID_COUNTERION"
     return False, "UNEXPLAINED_OR_INCOMPATIBLE_COMPONENT"
 
@@ -274,6 +317,15 @@ def generic_self_tests() -> list[dict]:
         ("covalent_ester", "O=C(O)c1ccccc1", "COC(=O)c1ccccc1", "NO_MATCH"),
         ("close_phenol_analog", "Oc1ccccc1", "Cc1ccccc1O", "NO_MATCH"),
         ("unrelated_charged_mixture_review", "O=C(O)c1ccccc1", "O=C(O)c1ccccc1.[Cl-]", "REVIEW"),
+        # PubChem-style neutral drawings of common counterions
+        ("amine_hydrochloride_neutral_drawn", "Nc1ccccc1", "Nc1ccccc1.Cl", "MATCH"),
+        ("amine_dihydrobromide_neutral_drawn", "NCCN", "NCCN.Br.Br", "MATCH"),
+        ("amine_nitrate_neutral_drawn", "Nc1ccccc1", "Nc1ccccc1.[N+](=O)(O)[O-]", "MATCH"),
+        ("amine_perchlorate_neutral_drawn", "Nc1ccccc1", "Nc1ccccc1.OCl(=O)(=O)=O", "MATCH"),
+        ("carboxylic_acid_neutral_sodium_atom", "O=C(O)c1ccccc1", "O=C(O)c1ccccc1.[Na]", "MATCH"),
+        ("acid_with_neutral_hcl_review", "O=C(O)c1ccccc1", "O=C(O)c1ccccc1.Cl", "REVIEW"),
+        ("amine_with_neutral_metal_review", "Nc1ccccc1", "Nc1ccccc1.[Na]", "REVIEW"),
+        ("amine_with_chlorinated_organic_review", "Nc1ccccc1", "Nc1ccccc1.ClCCCl", "REVIEW"),
     ]
     out = []
     for name, ref, cand, expected in tests:

@@ -50,7 +50,7 @@ RULE_SNAPSHOT_FILE = INTER / "04_identity_challenge_rules.csv"
 FINAL_HOLDOUT_ENV = os.getenv("IDENTITY_V5_FINAL_HOLDOUT_FILE", "").strip()
 EXECUTE_CLAUDE = os.getenv("IDENTITY_EXECUTE_CLAUDE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
-PROMPT_POLICY_VERSION = "study2-fair-v5-equal-structure-policy-20260930"
+PROMPT_POLICY_VERSION = "study2-fair-v5.1-equal-structure-policy-20260930"
 SYSTEMS = ["CLAUDE_DB", "RDKIT_SALT_AWARE_V5", "HYBRID_SALT_AWARE_V5"]
 
 STRUCTURAL_POLICY = (
@@ -58,6 +58,8 @@ STRUCTURAL_POLICY = (
     "disconnected components. Standardize ordinary charge/protonation and tautomer representation before "
     "comparing parent identity. One or more stoichiometric copies of the parent fragment may occur. Every "
     "remaining component must be a chemically compatible counterion or a common solvate; otherwise REVIEW. "
+    "Counterions may be drawn as ions, as neutral acids (for example hydrogen chloride written as Cl), or as "
+    "neutral metal atoms. "
     "Covalent derivatives or close analogs that do not contain the same parent connectivity are NO_MATCH. "
     "Stereo-only differences follow the supplied isomer_scope; when that scope is unspecified, REVIEW."
 )
@@ -287,11 +289,29 @@ def main() -> None:
         print("[STOP BEFORE PAID API] Review 05_v5_rdkit_preflight_predictions.csv and 05_v5_claude_prompt_manifest.csv."); return
 
     base.validate_api_key_for_http_header(); op_rows = bench[bench["operational_cas_eligible"]].copy(); paid = op_rows[op_rows["operational_structure_status"].eq("PUBCHEM_EXACT_CAS_VERIFIED")].copy(); unresolved = op_rows[~op_rows["operational_structure_status"].eq("PUBCHEM_EXACT_CAS_VERIFIED")].copy()
+    if len(paid):
+        # One real call before the batch: a bad model id or an unsupported request
+        # parameter must stop the run instead of turning every case into REVIEW.
+        # The result is cached, so the batch below reuses it.
+        probe = base.run_one_llm(paid.iloc[0].to_dict(), "DB_INFORMED", 1)
+        if clean(probe.get("call_status")) != "OK":
+            raise RuntimeError(f"Claude preflight call failed; no batch was run. Detail: {clean(probe.get('call_status'))}")
+        print(f"[CLAUDE PREFLIGHT OK] model={base.ANTHROPIC_MODEL} effort={base.EFFORT} max_tokens={base.MAX_TOKENS}")
     llm_rows = []
     for rep in range(1, base.N_REPEATS + 1):
         for _, r in unresolved.iterrows(): llm_rows.append({"case_id": clean(r.get("case_id")), "repeat": rep, "decision": "REVIEW", "classification_valid": False, "reason": "SHARED_DB_UNRESOLVED_NO_MODEL_CALL", "call_status": "DB_UNRESOLVED_NO_CALL", "elapsed_sec": 0.0})
         for row in paid.to_dict("records"): llm_rows.append(base.run_one_llm(row, "DB_INFORMED", rep))
     llm = pd.DataFrame(llm_rows); llm.to_csv(INTER / "05_v5_identity_claude_outputs.csv", index=False, encoding="utf-8-sig")
+    # A transport/API failure is not a model decision. Scoring it as REVIEW would
+    # silently lower CLAUDE_DB and HYBRID coverage, so stop instead. Successful
+    # calls are cached; rerunning retries only the failed ones.
+    failed = llm[~llm["call_status"].map(clean).isin({"OK", "DB_UNRESOLVED_NO_CALL"})]
+    if len(failed):
+        raise RuntimeError(
+            f"{len(failed)} of {len(llm)} Claude calls failed; results were NOT scored. "
+            "See call_status in 05_v5_identity_claude_outputs.csv and rerun Step 05 to retry the failed calls. "
+            f"First error: {clean(failed['call_status'].iloc[0])[:300]}"
+        )
 
     truth_map = dict(zip(bench["case_id"].map(clean), bench["reference_membership_bool"].map(as_bool))); br = bench.set_index(bench["case_id"].map(clean), drop=False); consensus = {}; consistency_rows = []
     for cid, g in llm.groupby(llm["case_id"].map(clean)):
