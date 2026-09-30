@@ -2,6 +2,7 @@
 """Study 2 / Step 04B CURATED BALANCED FINAL
 
 Freeze the manually curated, difficulty-balanced shared-DB chemical-identity benchmark.
+This is a benchmark-construction/provenance utility, not the active V4 comparator.
 
 Inputs
 ------
@@ -19,10 +20,10 @@ intermediate/04_identity_challenge_by_difficulty.csv
 intermediate/04_identity_challenge_qc.csv
 intermediate/04_identity_benchmark_readiness.json
 
-Next steps:
+Active FAIR V5 next steps:
     04C_prepare_dual_benchmark_METHODSAFE.py
-    05_compare_identity_SHARED_DB_METHODSAFE_V4.py
-    06_make_identity_results_METHODSAFE_V4.py
+    05_compare_identity_SHARED_DB_FAIR_V5.py
+    06_make_identity_results_FAIR_V5.py
 """
 
 from __future__ import annotations
@@ -182,7 +183,6 @@ def main():
         "no_duplicate_case_ids":bool(~bench["identity_benchmark_id"].duplicated().any()),
         "no_duplicate_rule_cas":bool(~bench[["rule_id","candidate_cas"]].duplicated().any()),
     }
-    # Convert pandas/numpy booleans to native Python bools before JSON serialization.
     checks = {k: bool(v) for k, v in checks.items()}
     failed=[k for k,v in checks.items() if not v]
     ready=bool(not failed)
@@ -225,7 +225,7 @@ def main():
     print(diff_tab.to_string())
 
     if ready:
-        print("\n[READY] Run 04C_prepare_dual_benchmark_METHODSAFE.py next, then dry-run 05_compare_identity_SHARED_DB_METHODSAFE_V4.py with Claude disabled.")
+        print("\n[READY] Run 04C_prepare_dual_benchmark_METHODSAFE.py next, then dry-run 05_compare_identity_SHARED_DB_FAIR_V5.py with Claude disabled.")
     else:
         print("\n[BLOCKED] Do not enable Claude. Inspect failed_checks above.")
 
