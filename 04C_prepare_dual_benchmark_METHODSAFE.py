@@ -70,7 +70,22 @@ def load(paths, label):
     p = first_existing(paths)
     if p is None:
         raise FileNotFoundError(f"Missing {label}. Expected one of: {[str(x) for x in paths]}")
-    return pd.read_csv(p, dtype=str).fillna(""), p
+
+    # Defensive reader: some exported CSV files may accidentally contain
+    # a two-line "<PARSED TEXT FOR SHEET ...>" wrapper before the real CSV header.
+    # Detect and skip only that known wrapper; normal CSV files are read unchanged.
+    skiprows = 0
+    try:
+        with open(p, "r", encoding="utf-8-sig", errors="replace") as fh:
+            first = fh.readline().strip()
+            second = fh.readline().strip()
+        if first.startswith("<PARSED TEXT FOR SHEET:") and second.startswith("TAB NAME:"):
+            skiprows = 2
+            print(f"[WARN] Detected parsed-text wrapper in {p.name}; skipping first 2 lines.")
+    except Exception:
+        pass
+
+    return pd.read_csv(p, dtype=str, skiprows=skiprows, encoding="utf-8-sig").fillna(""), p
 
 def parent_majority_baseline(df, parent_col="reference_parent_name"):
     tab = pd.crosstab(df[parent_col], df["reference_membership"])
