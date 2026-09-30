@@ -3,6 +3,8 @@
 
 Primary scoring is case-level. Repeated LLM calls were already collapsed to a
 consensus in Step 05, so deterministic systems are not pseudo-replicated.
+The paired primary endpoint is overall correct resolution: REVIEW remains in the
+denominator as unresolved and is therefore not silently dropped from McNemar.
 """
 from __future__ import annotations
 
@@ -51,7 +53,7 @@ def wilson(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
 
 def metrics(g: pd.DataFrame) -> dict:
     n = len(g); decided = g[g["decided"].map(as_bool)].copy(); nd = len(decided)
-    overall_correct = int((g["decided"].map(as_bool) & g["correct"].map(as_bool)).sum())
+    overall_correct = int(g["overall_correct_resolution"].map(as_bool).sum())
     overall = overall_correct / n if n else np.nan; o_lo, o_hi = wilson(overall_correct, n)
     if nd == 0:
         return {"n_total": n, "n_decided": 0, "coverage": 0.0 if n else np.nan, "accuracy": np.nan, "accuracy_ci95_low": np.nan, "accuracy_ci95_high": np.nan, "precision": np.nan, "recall": np.nan, "specificity": np.nan, "balanced_accuracy": np.nan, "false_safe_rate": np.nan, "false_positive_rate": np.nan, "overall_correct_resolution_rate": overall, "overall_correct_resolution_ci95_low": o_lo, "overall_correct_resolution_ci95_high": o_hi, "TP":0,"TN":0,"FP":0,"FN":0}
@@ -63,12 +65,17 @@ def metrics(g: pd.DataFrame) -> dict:
 
 
 def exact_mcnemar(df: pd.DataFrame, a: str, b: str) -> dict:
-    x = df[df["system"].eq(a)][["case_id","correct"]].copy(); y = df[df["system"].eq(b)][["case_id","correct"]].copy(); m = x.merge(y,on="case_id",suffixes=("_a","_b"))
-    bo = int((m["correct_a"].map(as_bool) & ~m["correct_b"].map(as_bool)).sum()); co = int((~m["correct_a"].map(as_bool) & m["correct_b"].map(as_bool)).sum()); n = bo+co
+    """Exact paired McNemar on pre-specified overall-correct-resolution endpoint."""
+    x = df[df["system"].eq(a)][["case_id","overall_correct_resolution"]].copy()
+    y = df[df["system"].eq(b)][["case_id","overall_correct_resolution"]].copy()
+    m = x.merge(y,on="case_id",suffixes=("_a","_b"))
+    ca = m["overall_correct_resolution_a"].map(as_bool)
+    cb = m["overall_correct_resolution_b"].map(as_bool)
+    bo = int((ca & ~cb).sum()); co = int((~ca & cb).sum()); n = bo+co
     if n == 0: p=1.0
     else:
         k=min(bo,co); p=min(1.0,2*sum(math.comb(n,i) for i in range(k+1))/(2**n))
-    return {"system_a":a,"system_b":b,"n_common":len(m),"a_only_correct":bo,"b_only_correct":co,"p_exact":p}
+    return {"endpoint":"overall_correct_resolution","system_a":a,"system_b":b,"n_common":len(m),"a_only_correct":bo,"b_only_correct":co,"p_exact":p}
 
 
 def benchmark_views(pred: pd.DataFrame, status: str):
@@ -86,6 +93,9 @@ def benchmark_views(pred: pd.DataFrame, status: str):
 def main() -> None:
     if not PRED.exists(): raise FileNotFoundError("Run 05_compare_identity_SHARED_DB_FAIR_V5.py with paid execution enabled first")
     pred = pd.read_csv(PRED).fillna(""); meta = json.loads(META.read_text(encoding="utf-8")) if META.exists() else {}; status = clean(meta.get("analysis_status")) or "UNKNOWN"
+    required = ["case_id","system","decided","truth_bool","pred_bool","overall_correct_resolution"]
+    missing = [c for c in required if c not in pred.columns]
+    if missing: raise ValueError(f"Step-05 prediction file missing required columns: {missing}")
     rows=[]; parent=[]; diff=[]; chall=[]; tests=[]
     for bench_name, q in benchmark_views(pred, status):
         for s in SYSTEMS:
@@ -104,9 +114,9 @@ def main() -> None:
     pd.DataFrame(rows).to_csv(OUT_PERF,index=False,encoding="utf-8-sig"); pd.DataFrame(parent).to_csv(OUT_PARENT,index=False,encoding="utf-8-sig"); pd.DataFrame(diff).to_csv(OUT_DIFF,index=False,encoding="utf-8-sig"); pd.DataFrame(chall).to_csv(OUT_CHALLENGE,index=False,encoding="utf-8-sig"); pd.DataFrame(tests).to_csv(OUT_TESTS,index=False,encoding="utf-8-sig")
     lines=["# FAIR V5 interpretation guardrail\n",f"- Analysis status: **{status}**\n"]
     if status.startswith("FINAL_"):
-        lines += ["- The independent-holdout overlap audit and pre-evaluation protocol-freeze checks passed in Step 05.\n","- Case-level McNemar tests may be interpreted as the pre-specified confirmatory pairwise comparisons.\n"]
+        lines += ["- The independent-holdout overlap audit and pre-evaluation protocol/holdout-freeze checks passed in Step 05.\n","- Case-level McNemar tests use the pre-specified overall-correct-resolution endpoint and may be interpreted as confirmatory pairwise comparisons.\n"]
     else:
-        lines += ["- These results use data already available during method refinement and are therefore **development/exploratory**, not confirmatory.\n","- McNemar p-values are retained for diagnostics only and should not be used as final inferential evidence.\n","- Freeze the V5 protocol with Step 04D, then evaluate a new candidate-CAS-disjoint holdout for final claims.\n"]
+        lines += ["- These results use data already available during method refinement and are therefore **development/exploratory**, not confirmatory.\n","- McNemar p-values are retained for diagnostics only and should not be used as final inferential evidence.\n","- Freeze the V5 protocol with Step 04D, freeze a new candidate-CAS-disjoint holdout with Step 04E, then evaluate it for final claims.\n"]
     lines += ["- All three systems receive the same PubChem-resolved candidate structure, reference-parent structure, and stereochemistry policy.\n","- The hybrid uses the frozen salt-aware RDKit decision first and calls no extra LLM arm; it reuses the same case-level LLM consensus only when RDKit returns REVIEW.\n","- Selective accuracy excludes REVIEW; overall correct resolution keeps REVIEW in the denominator as unresolved.\n"]
     OUT_NOTE.write_text("".join(lines),encoding="utf-8")
     print(pd.DataFrame(rows).to_string(index=False)); print(f"\nAnalysis status: {status}"); print(f"Saved: {OUT_PERF.name}, {OUT_PARENT.name}, {OUT_DIFF.name}, {OUT_TESTS.name}")
