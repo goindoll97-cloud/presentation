@@ -33,6 +33,15 @@ def load_engine():
     return mod
 
 
+def load_step05():
+    spec = importlib.util.spec_from_file_location("identity_v5_step05", STEP05)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Could not load Step 05 V5")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def main() -> None:
     for p in [ENGINE, STEP05]:
         if not p.exists():
@@ -41,6 +50,9 @@ def main() -> None:
     tests = eng.generic_self_tests()
     if not tests or not all(bool(r.get("pass")) for r in tests):
         raise RuntimeError("Generic benchmark-independent V5 self-tests did not all pass")
+    # Model, effort, max_tokens, repeats, system prompt and base-module hash.
+    # Set IDENTITY_ANTHROPIC_* exactly as for the final run before freezing.
+    llm_protocol = load_step05().llm_protocol_config()
 
     manifest = {
         "frozen_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -51,6 +63,7 @@ def main() -> None:
         "engine_sha256": sha256(ENGINE),
         "step05_file": STEP05.name,
         "step05_sha256": sha256(STEP05),
+        "llm_protocol": llm_protocol,
         "generic_self_tests": tests,
         "confirmatory_requirement": (
             "A final holdout is confirmatory only if it was frozen after this protocol freeze, "
