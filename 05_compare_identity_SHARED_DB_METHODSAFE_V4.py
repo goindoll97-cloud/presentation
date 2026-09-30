@@ -997,4 +997,307 @@ def main() -> None:
             futs = {ex.submit(run_one_llm, row, "DB_INFORMED", rep): row for row in records}
             for fut in as_completed(futs):
                 llm_rows.append(fut.result()); done += 1
-                if done % 10 == 0 or done == len(records):
+                if done % 10 == 0 or done == len(records):                    elapsed = max(0.001, time.perf_counter() - batch_t0)
+                    print(f"  {done}/{len(records)} | {elapsed/done:.1f} wall-s/completed-case")
+        batch_wall = float(time.perf_counter() - batch_t0)
+        batch_runtime_rows.append({
+            "system": "CLAUDE_DB", "setting": "OPERATIONAL_SHARED_DB", "repeat": rep,
+            "n_cases": len(records), "workers": WORKERS, "batch_wall_sec": batch_wall,
+            "wall_sec_per_case": batch_wall / max(1, len(records)),
+            "note": "Actual batch wall time for the single paid Claude+DB arm.",
+        })
+
+    llm = pd.DataFrame(llm_rows)
+    llm.to_csv(INTERMEDIATE / "05_identity_claude_outputs.csv", index=False, encoding="utf-8-sig")
+
+    # ------------------------------------------------------------------
+    # D. Build the three FINAL systems. Hybrid REUSES Claude+DB output.
+    # ------------------------------------------------------------------
+    systems = []
+    truth_map = dict(zip(
+        bench["case_id"].map(clean),
+        bench["reference_membership_bool"].map(lambda x: str(x).lower() in {"true", "1"})
+    ))
+    bench_by_case = bench.set_index(bench["case_id"].map(clean), drop=False)
+
+    # DB + RDKit: deterministic predictions replicated across repeats only for
+    # paired performance statistics; no extra deterministic execution occurs.
+    for rep in range(1, N_REPEATS + 1):
+        for _, r in bench[bench["operational_cas_eligible"]].iterrows():
+            cid = clean(r.get("case_id")); truth = truth_map[cid]
+            decision = clean(r.get("rdkit_operational_decision")).upper() or "REVIEW"
+            pb = pred_bool(decision); decided = pb is not None
+            runtime_sec = pd.to_numeric(pd.Series([r.get("rdkit_operational_total_elapsed_sec")]), errors="coerce").iloc[0]
+            runtime_sec = float(runtime_sec) if pd.notna(runtime_sec) else np.nan
+            systems.append({
+                "case_id": cid, "repeat": rep, "system": "RDKIT_CAS_LOOKUP", "setting": "OPERATIONAL_SHARED_DB",
+                "decision": decision, "decision_source": "PUBCHEM_EXACT_CAS_TO_RDKIT",
+                "truth_bool": truth, "pred_bool": pb, "decided": decided,
+                "correct": bool(pb == truth) if decided else False,
+                "false_safe": bool(decided and truth and pb is False),
+                "false_positive": bool(decided and (not truth) and pb is True),
+                "runtime_sec": runtime_sec, "runtime_type": "MEASURED_SHARED_PUBCHEM_PLUS_RDKIT",
+            })
+
+    # DB + RDKit V4.3 SENSITIVITY: post-preflight method refinement.
+    for rep in range(1, N_REPEATS + 1):
+        for _, r in bench[bench["operational_cas_eligible"]].iterrows():
+            cid = clean(r.get("case_id")); truth = truth_map[cid]
+            decision = clean(r.get("rdkit_v43_sensitivity_decision")).upper() or "REVIEW"
+            pb = pred_bool(decision); decided = pb is not None
+            runtime_sec = pd.to_numeric(pd.Series([r.get("rdkit_v43_sensitivity_total_elapsed_sec")]), errors="coerce").iloc[0]
+            runtime_sec = float(runtime_sec) if pd.notna(runtime_sec) else np.nan
+            systems.append({
+                "case_id": cid, "repeat": rep, "system": "RDKIT_V43_SENSITIVITY", "setting": "OPERATIONAL_SHARED_DB",
+                "decision": decision, "decision_source": "POST_PREFLIGHT_SALT_AWARE_SENSITIVITY",
+                "truth_bool": truth, "pred_bool": pb, "decided": decided,
+                "correct": bool(pb == truth) if decided else False,
+                "false_safe": bool(decided and truth and pb is False),
+                "false_positive": bool(decided and (not truth) and pb is True),
+                "runtime_sec": runtime_sec, "runtime_type": "MEASURED_SHARED_PUBCHEM_PLUS_RDKIT_V43",
+            })
+
+    # LLM + DB
+    for _, o in llm.iterrows():
+        cid = clean(o.get("case_id")); rep = int(o.get("repeat", 1)); truth = truth_map[cid]
+        decision = clean(o.get("decision")).upper() if bool(o.get("classification_valid")) else "REVIEW"
+        pb = pred_bool(decision); decided = pb is not None
+        llm_elapsed = pd.to_numeric(pd.Series([o.get("elapsed_sec")]), errors="coerce").iloc[0]
+        llm_elapsed = float(llm_elapsed) if pd.notna(llm_elapsed) else np.nan
+        br = bench_by_case.loc[cid]
+        lookup_elapsed = pd.to_numeric(pd.Series([br.get("operational_structure_lookup_elapsed_sec")]), errors="coerce").iloc[0]
+        lookup_elapsed = float(lookup_elapsed) if pd.notna(lookup_elapsed) else np.nan
+        runtime_sec = lookup_elapsed + llm_elapsed if np.isfinite(lookup_elapsed) and np.isfinite(llm_elapsed) else np.nan
+        systems.append({
+            "case_id": cid, "repeat": rep, "system": "CLAUDE_DB", "setting": "OPERATIONAL_SHARED_DB",
+            "decision": decision, "decision_source": "CLAUDE_DB_INFORMED",
+            "truth_bool": truth, "pred_bool": pb, "decided": decided,
+            "correct": bool(pb == truth) if decided else False,
+            "false_safe": bool(decided and truth and pb is False),
+            "false_positive": bool(decided and (not truth) and pb is True),
+            "runtime_sec": runtime_sec, "runtime_type": "COMPOSED_SHARED_PUBCHEM_PLUS_CLAUDE",
+        })
+
+    # Hybrid = RDKit primary; on REVIEW use the SAME Claude+DB result already paid for.
+    llm_index = {(clean(r["case_id"]), int(r["repeat"])): r for _, r in llm.iterrows()}
+    for rep in range(1, N_REPEATS + 1):
+        for _, r in bench[bench["operational_cas_eligible"]].iterrows():
+            cid = clean(r.get("case_id")); truth = truth_map[cid]
+            decision = clean(r.get("rdkit_operational_decision")).upper(); source = "RDKIT_PRIMARY"
+            lo = llm_index.get((cid, rep), {})
+            if decision not in {"MATCH", "NO_MATCH"}:
+                decision = clean(lo.get("decision")).upper() if bool(lo.get("classification_valid")) else "REVIEW"
+                source = "REUSED_CLAUDE_DB_FALLBACK"
+            pb = pred_bool(decision); decided = pb is not None
+            rd_elapsed = pd.to_numeric(pd.Series([r.get("rdkit_operational_total_elapsed_sec")]), errors="coerce").iloc[0]
+            rd_elapsed = float(rd_elapsed) if pd.notna(rd_elapsed) else np.nan
+            fallback_elapsed = 0.0
+            if source == "REUSED_CLAUDE_DB_FALLBACK":
+                le = pd.to_numeric(pd.Series([lo.get("elapsed_sec")]), errors="coerce").iloc[0]
+                fallback_elapsed = float(le) if pd.notna(le) else np.nan
+            hybrid_elapsed = rd_elapsed + fallback_elapsed if np.isfinite(rd_elapsed) and np.isfinite(fallback_elapsed) else np.nan
+            systems.append({
+                "case_id": cid, "repeat": rep, "system": "HYBRID_OPERATIONAL", "setting": "OPERATIONAL_SHARED_DB",
+                "decision": decision or "REVIEW", "decision_source": source,
+                "truth_bool": truth, "pred_bool": pb, "decided": decided,
+                "correct": bool(pb == truth) if decided else False,
+                "false_safe": bool(decided and truth and pb is False),
+                "false_positive": bool(decided and (not truth) and pb is True),
+                "runtime_sec": hybrid_elapsed,
+                "runtime_type": "RDKIT_PLUS_REUSED_CLAUDE_LATENCY_ON_FALLBACK" if source != "RDKIT_PRIMARY" else "RDKIT_PRIMARY_ONLY",
+            })
+
+    # Hybrid V4.3 sensitivity = V4.3 primary; same Claude result reused on REVIEW.
+    for rep in range(1, N_REPEATS + 1):
+        for _, r in bench[bench["operational_cas_eligible"]].iterrows():
+            cid = clean(r.get("case_id")); truth = truth_map[cid]
+            decision = clean(r.get("rdkit_v43_sensitivity_decision")).upper(); source = "RDKIT_V43_PRIMARY"
+            lo = llm_index.get((cid, rep), {})
+            if decision not in {"MATCH", "NO_MATCH"}:
+                decision = clean(lo.get("decision")).upper() if bool(lo.get("classification_valid")) else "REVIEW"
+                source = "REUSED_CLAUDE_DB_FALLBACK"
+            pb = pred_bool(decision); decided = pb is not None
+            rd_elapsed = pd.to_numeric(pd.Series([r.get("rdkit_v43_sensitivity_total_elapsed_sec")]), errors="coerce").iloc[0]
+            rd_elapsed = float(rd_elapsed) if pd.notna(rd_elapsed) else np.nan
+            fallback_elapsed = 0.0
+            if source == "REUSED_CLAUDE_DB_FALLBACK":
+                le = pd.to_numeric(pd.Series([lo.get("elapsed_sec")]), errors="coerce").iloc[0]
+                fallback_elapsed = float(le) if pd.notna(le) else np.nan
+            hybrid_elapsed = rd_elapsed + fallback_elapsed if np.isfinite(rd_elapsed) and np.isfinite(fallback_elapsed) else np.nan
+            systems.append({
+                "case_id": cid, "repeat": rep, "system": "HYBRID_V43_SENSITIVITY", "setting": "OPERATIONAL_SHARED_DB",
+                "decision": decision or "REVIEW", "decision_source": source,
+                "truth_bool": truth, "pred_bool": pb, "decided": decided,
+                "correct": bool(pb == truth) if decided else False,
+                "false_safe": bool(decided and truth and pb is False),
+                "false_positive": bool(decided and (not truth) and pb is True),
+                "runtime_sec": hybrid_elapsed,
+                "runtime_type": "RDKIT_V43_PLUS_REUSED_CLAUDE_LATENCY_ON_FALLBACK" if source != "RDKIT_V43_PRIMARY" else "RDKIT_V43_PRIMARY_ONLY",
+            })
+
+    pred = pd.DataFrame(systems)
+    meta_cols = _benchmark_metadata_cols(bench)
+    # case_id is already in pred, so merge the remaining metadata only.
+    meta_merge = [c for c in meta_cols if c != "case_id"]
+    pred = pred.merge(bench[["case_id"] + meta_merge], on="case_id", how="left")
+    pred["overall_correct_resolution"] = pred["decided"] & pred["correct"]
+    pred.to_csv(INTERMEDIATE / "05_identity_system_predictions.csv", index=False, encoding="utf-8-sig")
+
+    # ------------------------------------------------------------------
+    # E. Performance overall + pre-frozen difficulty/challenge strata
+    # ------------------------------------------------------------------
+    perf_rows = []
+    for (system, setting, rep), g in pred.groupby(["system", "setting", "repeat"], sort=False):
+        m = performance(g)
+        m["overall_correct_resolution_rate"] = float(g["overall_correct_resolution"].mean()) if len(g) else np.nan
+        perf_rows.append({"system": system, "setting": setting, "repeat": rep, **m})
+    perf = pd.DataFrame(perf_rows)
+    perf.to_csv(INTERMEDIATE / "05_identity_performance_by_repeat.csv", index=False, encoding="utf-8-sig")
+
+    agg_spec = {
+        "n_repeats": ("repeat", "nunique"), "n_total": ("n_total", "max"),
+        "coverage_mean": ("coverage", "mean"), "coverage_sd": ("coverage", "std"),
+        "accuracy_mean": ("accuracy", "mean"), "accuracy_sd": ("accuracy", "std"),
+        "recall_mean": ("recall", "mean"), "recall_sd": ("recall", "std"),
+        "specificity_mean": ("specificity", "mean"), "specificity_sd": ("specificity", "std"),
+        "false_safe_rate_mean": ("false_safe_rate", "mean"), "false_safe_rate_sd": ("false_safe_rate", "std"),
+        "false_positive_rate_mean": ("false_positive_rate", "mean"), "false_positive_rate_sd": ("false_positive_rate", "std"),
+        "overall_correct_resolution_rate_mean": ("overall_correct_resolution_rate", "mean"),
+        "overall_correct_resolution_rate_sd": ("overall_correct_resolution_rate", "std"),
+    }
+    mean = perf.groupby(["system", "setting"], as_index=False).agg(**agg_spec)
+    mean.to_csv(INTERMEDIATE / "05_identity_performance_mean.csv", index=False, encoding="utf-8-sig")
+
+    def stratified_perf(group_col: str, outfile: str) -> None:
+        if group_col not in pred.columns:
+            return
+        rows = []
+        for (system, rep, level), g in pred.groupby(["system", "repeat", group_col], sort=False, dropna=False):
+            m = performance(g)
+            m["overall_correct_resolution_rate"] = float(g["overall_correct_resolution"].mean()) if len(g) else np.nan
+            rows.append({"system": system, "repeat": rep, group_col: level, **m})
+        pd.DataFrame(rows).to_csv(INTERMEDIATE / outfile, index=False, encoding="utf-8-sig")
+
+    stratified_perf("difficulty", "05_identity_performance_by_difficulty.csv")
+    stratified_perf("challenge_class", "05_identity_performance_by_challenge_class.csv")
+    stratified_perf("designation_id", "05_identity_performance_by_rule.csv")
+
+    # Paired tests only among the three fair systems.
+    tests = []
+    for a, b in [
+        ("CLAUDE_DB", "RDKIT_CAS_LOOKUP"),
+        ("CLAUDE_DB", "HYBRID_OPERATIONAL"),
+        ("RDKIT_CAS_LOOKUP", "HYBRID_OPERATIONAL"),
+    ]:
+        tests.extend(exact_mcnemar_by_repeat(pred, a, b))
+    pd.DataFrame(tests).to_csv(INTERMEDIATE / "05_identity_paired_mcnemar.csv", index=False, encoding="utf-8-sig")
+
+    sensitivity_tests = []
+    for a, b in [
+        ("RDKIT_CAS_LOOKUP", "RDKIT_V43_SENSITIVITY"),
+        ("HYBRID_OPERATIONAL", "HYBRID_V43_SENSITIVITY"),
+        ("CLAUDE_DB", "RDKIT_V43_SENSITIVITY"),
+    ]:
+        sensitivity_tests.extend(exact_mcnemar_by_repeat(pred, a, b))
+    pd.DataFrame(sensitivity_tests).to_csv(
+        INTERMEDIATE / "05_identity_paired_mcnemar_v43_sensitivity.csv", index=False, encoding="utf-8-sig"
+    )
+
+    # Claude repeat consistency.
+    cons = pd.DataFrame()
+    if N_REPEATS > 1 and not llm.empty:
+        valid = llm[llm["classification_valid"]].pivot_table(index="case_id", columns="repeat", values="decision", aggfunc="first").dropna()
+        if not valid.empty:
+            cons = pd.DataFrame([{
+                "input_condition": "DB_INFORMED",
+                "n_cases_all_repeats_valid": len(valid),
+                "decision_consistency": float(valid.nunique(axis=1).eq(1).mean()),
+            }])
+    cons.to_csv(INTERMEDIATE / "05_identity_repeat_consistency.csv", index=False, encoding="utf-8-sig")
+
+    # Failure and review cases are both scientifically informative.
+    pred[pred["decided"] & (~pred["correct"])].to_csv(
+        INTERMEDIATE / "05_identity_failure_cases.csv", index=False, encoding="utf-8-sig"
+    )
+    pred[~pred["decided"]].to_csv(
+        INTERMEDIATE / "05_identity_review_cases.csv", index=False, encoding="utf-8-sig"
+    )
+
+    # ------------------------------------------------------------------
+    # F. Runtime outputs
+    # ------------------------------------------------------------------
+    runtime_cols = [
+        "case_id", "repeat", "system", "setting", "decision", "decision_source",
+        "runtime_sec", "runtime_type", "candidate_cas", "candidate_name", "reference_parent_name",
+        "difficulty", "challenge_class",
+    ]
+    runtime_per_case = pred[[c for c in runtime_cols if c in pred.columns]].copy()
+    runtime_per_case.to_csv(RUNTIME_PER_CASE_FILE, index=False, encoding="utf-8-sig")
+
+    rt = runtime_per_case[pd.to_numeric(runtime_per_case["runtime_sec"], errors="coerce").notna()].copy()
+    rt["runtime_sec"] = pd.to_numeric(rt["runtime_sec"], errors="coerce")
+    rt_rows = []
+    for (system, setting), g in rt.groupby(["system", "setting"], sort=False):
+        # RDKit physical execution occurs once per case; deterministic rows were
+        # replicated only for paired statistics.
+        ge = g.drop_duplicates("case_id") if system in {"RDKIT_CAS_LOOKUP", "RDKIT_V43_SENSITIVITY"} else g
+        x = ge["runtime_sec"].dropna().astype(float)
+        if x.empty:
+            continue
+        rt_rows.append({
+            "system": system, "setting": setting, "n_timed_rows": len(x), "n_unique_cases": ge["case_id"].nunique(),
+            "n_repeats_observed": g["repeat"].nunique(), "mean_sec_per_case": float(x.mean()),
+            "sd_sec_per_case": float(x.std(ddof=1)) if len(x) > 1 else 0.0, "median_sec_per_case": float(x.median()),
+            "p25_sec_per_case": float(x.quantile(.25)), "p75_sec_per_case": float(x.quantile(.75)),
+            "min_sec_per_case": float(x.min()), "max_sec_per_case": float(x.max()),
+        })
+    runtime_summary = pd.DataFrame(rt_rows)
+    runtime_summary.to_csv(RUNTIME_SUMMARY_FILE, index=False, encoding="utf-8-sig")
+
+    ppt_map = {
+        "CLAUDE_DB": "LLM + DB",
+        "RDKIT_CAS_LOOKUP": "DB + RDKit",
+        "HYBRID_OPERATIONAL": "Hybrid",
+    }
+    ppt = runtime_summary[runtime_summary["system"].isin(ppt_map)].copy()
+    if not ppt.empty:
+        ppt.insert(0, "presentation_system", ppt["system"].map(ppt_map))
+    ppt.to_csv(RUNTIME_PPT_FILE, index=False, encoding="utf-8-sig")
+
+    batch_runtime_rows.append({
+        "system": "RDKIT_DETERMINISTIC_STAGE", "setting": "OPERATIONAL_SHARED_DB_PRECOMPUTE", "repeat": 0,
+        "n_cases": int(len(bench)), "workers": 1, "batch_wall_sec": deterministic_stage_wall_sec,
+        "wall_sec_per_case": deterministic_stage_wall_sec / max(1, len(bench)),
+    })
+    pd.DataFrame(batch_runtime_rows).to_csv(RUNTIME_BATCH_FILE, index=False, encoding="utf-8-sig")
+
+    config = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "claude_model": ANTHROPIC_MODEL, "repeats": N_REPEATS, "workers": WORKERS, "effort": EFFORT,
+        "study_design": "SHARED_DB_ONLY_NO_CLOSED_LLM",
+        "primary_systems": ["CLAUDE_DB", "RDKIT_CAS_LOOKUP", "HYBRID_OPERATIONAL"],
+        "sensitivity_systems": ["RDKIT_V43_SENSITIVITY", "HYBRID_V43_SENSITIVITY"],
+        "systems": ["CLAUDE_DB", "RDKIT_CAS_LOOKUP", "HYBRID_OPERATIONAL", "RDKIT_V43_SENSITIVITY", "HYBRID_V43_SENSITIVITY"],
+        "shared_db_definition": "One exact-CAS-verified PubChem resolution shared by all systems.",
+        "hybrid_policy": "Frozen RDKit primary; reuse same case/repeat Claude+DB result only when RDKit returns REVIEW.",
+        "v43_status": "POST_PREFLIGHT_SENSITIVITY_ONLY_NOT_PRIMARY_INFERENCE",
+        "additional_paid_hybrid_calls": 0,
+        "closed_llm_removed": True,
+        "controlled_structure_claude_removed": True,
+        "reference_type": "source-supported chemical identity operational reference; not expert legal gold",
+        "readiness_snapshot": readiness,
+        "api_plan": api_plan,
+    }
+    (INTERMEDIATE / "05_identity_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\n[FINAL mean performance]")
+    show = [
+        "system", "coverage_mean", "accuracy_mean", "overall_correct_resolution_rate_mean",
+        "recall_mean", "specificity_mean", "false_safe_rate_mean",
+    ]
+    print(mean[show].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    print("\nSaved to intermediate/. Next: python 06_make_identity_results_METHODSAFE_V4.py")
+
+
+if __name__ == "__main__":
+    main()
