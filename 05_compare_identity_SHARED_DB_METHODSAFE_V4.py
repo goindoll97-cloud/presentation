@@ -430,6 +430,22 @@ def api_key() -> str:
     return clean(os.getenv("ANTHROPIC_API_KEY", ""))
 
 
+def validate_api_key_for_http_header() -> str:
+    """Fail fast before any batch run when the API key cannot be sent as an HTTP header."""
+    key = api_key()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is missing. No API call was made.")
+    try:
+        key.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY contains non-ASCII characters. "
+            "Replace placeholder text (for example Korean text such as '본인의_API_KEY') "
+            "with the actual Anthropic API key before running the paid experiment."
+        ) from exc
+    return key
+
+
 def extract_json(content: Any) -> dict:
     if isinstance(content, dict):
         return content
@@ -986,8 +1002,7 @@ def main() -> None:
         raise RuntimeError(
             "Paid Claude run blocked by Step 04 readiness gate. Failed checks: " + ", ".join(map(str, failed))
         )
-    if not api_key():
-        raise RuntimeError("ANTHROPIC_API_KEY is missing. No API call was made.")
+    validate_api_key_for_http_header()
 
     # ------------------------------------------------------------------
     # C. Claude + DB: ONE paid arm only
@@ -999,6 +1014,22 @@ def main() -> None:
     paid_rows = op_rows[op_rows["operational_structure_status"].eq("PUBCHEM_EXACT_CAS_VERIFIED")].copy()
     unresolved_rows = op_rows[~op_rows["operational_structure_status"].eq("PUBCHEM_EXACT_CAS_VERIFIED")].copy()
     records = paid_rows.to_dict("records")
+
+    # One real case is executed first as a fail-fast API/schema preflight.
+    # Its successful result is reused as repeat-1 output, so this adds zero extra paid calls.
+    preflight_result = None
+    preflight_case_id = ""
+    if records:
+        print("\n[PREFLIGHT] One Claude+DB case before the batch ...")
+        preflight_result = run_one_llm(records[0], "DB_INFORMED", 1)
+        if clean(preflight_result.get("call_status")) != "OK":
+            raise RuntimeError(
+                "Claude preflight failed before the batch. "
+                f"{clean(preflight_result.get('call_status'))}"
+            )
+        preflight_case_id = clean(preflight_result.get("case_id"))
+        llm_rows.append(preflight_result)
+        print(f"[PREFLIGHT] OK | case={preflight_case_id} | decision={clean(preflight_result.get('decision'))}")
 
     for rep in range(1, N_REPEATS + 1):
         # Fair shared-DB gate: if PubChem cannot resolve one exact candidate structure,
@@ -1023,22 +1054,29 @@ def main() -> None:
                 "runtime_source": "NO_API_CALL_DB_UNRESOLVED",
             })
 
-        print(f"\n[DB_INFORMED] repeat {rep}/{N_REPEATS} | paid n={len(records)} | auto-REVIEW n={len(unresolved_rows)}")
+        rep_records = records[1:] if (rep == 1 and preflight_result is not None) else records
+        n_paid_this_batch = len(rep_records)
+        print(
+            f"\n[DB_INFORMED] repeat {rep}/{N_REPEATS} | "
+            f"paid batch n={n_paid_this_batch} | auto-REVIEW n={len(unresolved_rows)}"
+            + (" | 1 preflight result reused" if rep == 1 and preflight_result is not None else "")
+        )
         batch_t0 = time.perf_counter(); done = 0
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futs = {ex.submit(run_one_llm, row, "DB_INFORMED", rep): row for row in records}
+            futs = {ex.submit(run_one_llm, row, "DB_INFORMED", rep): row for row in rep_records}
             for fut in as_completed(futs):
                 llm_rows.append(fut.result()); done += 1
-                if done % 10 == 0 or done == len(records):
+                if done % 10 == 0 or done == n_paid_this_batch:
                     elapsed = max(0.001, time.perf_counter() - batch_t0)
-                    print(f"  {done}/{len(records)} | {elapsed/done:.1f} wall-s/completed-paid-case")
+                    print(f"  {done}/{n_paid_this_batch} | {elapsed/max(1,done):.1f} wall-s/completed-paid-case")
         batch_wall = float(time.perf_counter() - batch_t0)
         batch_runtime_rows.append({
             "system": "CLAUDE_DB", "setting": "OPERATIONAL_SHARED_DB", "repeat": rep,
-            "n_cases": len(records), "n_auto_review_no_call": len(unresolved_rows),
+            "n_cases": n_paid_this_batch + (1 if rep == 1 and preflight_result is not None else 0),
+            "n_auto_review_no_call": len(unresolved_rows),
             "workers": WORKERS, "batch_wall_sec": batch_wall,
             "wall_sec_per_case": batch_wall / max(1, len(records)),
-            "note": "Actual batch wall time for paid Claude+DB calls only; DB-unresolved rows are auto-REVIEW without model calls.",
+            "note": "Actual batch wall time for paid Claude+DB calls only; repeat 1 excludes the separately timed preflight call, which is reused as a result. DB-unresolved rows are auto-REVIEW without model calls.",
         })
 
     llm = pd.DataFrame(llm_rows)
