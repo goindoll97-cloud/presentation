@@ -50,7 +50,7 @@ RULE_SNAPSHOT_FILE = INTER / "04_identity_challenge_rules.csv"
 FINAL_HOLDOUT_ENV = os.getenv("IDENTITY_V5_FINAL_HOLDOUT_FILE", "").strip()
 EXECUTE_CLAUDE = os.getenv("IDENTITY_EXECUTE_CLAUDE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
-PROMPT_POLICY_VERSION = "study2-fair-v5.1-equal-structure-policy-20260930"
+PROMPT_POLICY_VERSION = "study2-fair-v5.2-equal-structure-policy-20260930"
 SYSTEMS = ["CLAUDE_DB", "RDKIT_SALT_AWARE_V5", "HYBRID_SALT_AWARE_V5"]
 
 STRUCTURAL_POLICY = (
@@ -60,8 +60,11 @@ STRUCTURAL_POLICY = (
     "remaining component must be a chemically compatible counterion or a common solvate; otherwise REVIEW. "
     "Counterions may be drawn as ions, as neutral acids (for example hydrogen chloride written as Cl), or as "
     "neutral metal atoms. "
+    "Common solvates are water, methanol, ethanol, isopropanol, acetone, acetonitrile, carbon dioxide, "
+    "dimethyl sulfoxide and 1,4-dioxane. "
     "Covalent derivatives or close analogs that do not contain the same parent connectivity are NO_MATCH. "
-    "Stereo-only differences follow the supplied isomer_scope; when that scope is unspecified, REVIEW."
+    "If the reference parent SMILES specifies no stereochemistry, every stereoisomer of the parent is in scope. "
+    "Otherwise stereo-only differences follow the supplied isomer_scope; when that scope is unspecified, REVIEW."
 )
 
 
@@ -74,6 +77,28 @@ def _load_module(path: Path, name: str):
     return mod
 
 
+def _load_dotenv_early() -> None:
+    """Load .env BEFORE the base module reads IDENTITY_ANTHROPIC_* settings at import.
+
+    Existing environment variables win, matching base.load_dotenv().
+    """
+    for p in [ROOT / ".env", Path.cwd() / ".env"]:
+        if not p.exists():
+            continue
+        try:
+            for line in p.read_text(encoding="utf-8-sig").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except Exception:
+            pass
+
+
+_load_dotenv_early()
 if not BASE_FILE.exists():
     raise FileNotFoundError(BASE_FILE)
 if not ENGINE_FILE.exists():
@@ -176,6 +201,26 @@ def validate_holdout_independence(holdout: pd.DataFrame) -> dict:
     return audit
 
 
+def llm_protocol_config() -> dict:
+    """Everything that defines the LLM arm besides this file and the engine.
+
+    Recorded by Step 04D and re-checked before a final-holdout run, so a change
+    to the base module (system prompt, API request, PubChem lookup) or to the
+    model settings after the freeze is detected.
+    """
+    return {
+        "base_file": BASE_FILE.name,
+        "base_sha256": sha256_file(BASE_FILE),
+        "anthropic_model": base.ANTHROPIC_MODEL,
+        "anthropic_effort": base.EFFORT,
+        "anthropic_max_tokens": int(base.MAX_TOKENS),
+        "llm_repeats": int(base.N_REPEATS),
+        "system_prompt_sha256": hashlib.sha256(base.SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+        "prompt_policy_version": PROMPT_POLICY_VERSION,
+        "prompt_policy_sha256": hashlib.sha256(STRUCTURAL_POLICY.encode("utf-8")).hexdigest(),
+    }
+
+
 def verify_protocol_freeze() -> dict:
     if not FREEZE_FILE.exists():
         raise RuntimeError("Final holdout execution requires 04D_fair_v5_protocol_freeze.json. Run Step 04D before opening/evaluating the holdout.")
@@ -185,6 +230,7 @@ def verify_protocol_freeze() -> dict:
         "step05_sha256_match": clean(freeze.get("step05_sha256")) == sha256_file(Path(__file__).resolve()),
         "engine_version_match": clean(freeze.get("engine_version")) == clean(engine.ENGINE_VERSION),
         "policy_version_match": clean(freeze.get("policy_version")) == clean(engine.POLICY_VERSION),
+        "llm_protocol_match": freeze.get("llm_protocol") == llm_protocol_config(),
     }
     if not all(checks.values()):
         raise RuntimeError(f"FAIR V5 protocol changed after freeze: {checks}. Re-freezing after viewing the holdout would invalidate confirmatory status.")
@@ -280,7 +326,7 @@ def main() -> None:
         text = prompt_for_v5(r, "DB_INFORMED"); manifests.append({"case_id": clean(r.get("case_id")), "candidate_structure_status": clean(r.get("operational_structure_status")), "paid_api_eligible": clean(r.get("operational_structure_status")) == "PUBCHEM_EXACT_CAS_VERIFIED", "prompt_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "prompt_text": text})
     manifest = pd.DataFrame(manifests); manifest.to_csv(INTER / "05_v5_claude_prompt_manifest.csv", index=False, encoding="utf-8-sig")
 
-    run_meta = {"created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "analysis_status": analysis_status, "benchmark_file": str(benchmark_path), "benchmark_sha256": sha256_file(benchmark_path), "engine_version": engine.ENGINE_VERSION, "engine_policy_version": engine.POLICY_VERSION, "engine_sha256": sha256_file(ENGINE_FILE), "step05_sha256": sha256_file(Path(__file__).resolve()), "prompt_policy_version": PROMPT_POLICY_VERSION, "prompt_policy_sha256": hashlib.sha256(STRUCTURAL_POLICY.encode("utf-8")).hexdigest(), "same_candidate_structure_all_systems": True, "same_reference_structure_all_systems": True, "same_isomer_scope_all_systems": True, "candidate_name_withheld_from_decision_models": True, "candidate_cas_withheld_after_shared_lookup": True, "source_smiles_not_used_for_operational_decision": True, "compound_specific_rdkit_exceptions": False, "llm_repeats": int(base.N_REPEATS), "current_60_134_status": "development/exploratory only" if not analysis_status.startswith("FINAL_") else "not used for confirmatory scoring", "holdout_overlap_audit": holdout_audit, "protocol_freeze": freeze, "generic_engine_self_tests": self_tests}
+    run_meta = {"created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "analysis_status": analysis_status, "benchmark_file": str(benchmark_path), "benchmark_sha256": sha256_file(benchmark_path), "engine_version": engine.ENGINE_VERSION, "engine_policy_version": engine.POLICY_VERSION, "engine_sha256": sha256_file(ENGINE_FILE), "step05_sha256": sha256_file(Path(__file__).resolve()), "prompt_policy_version": PROMPT_POLICY_VERSION, "prompt_policy_sha256": hashlib.sha256(STRUCTURAL_POLICY.encode("utf-8")).hexdigest(), "same_candidate_structure_all_systems": True, "same_reference_structure_all_systems": True, "same_isomer_scope_all_systems": True, "candidate_name_withheld_from_decision_models": True, "candidate_cas_withheld_after_shared_lookup": True, "source_smiles_not_used_for_operational_decision": True, "compound_specific_rdkit_exceptions": False, "llm_repeats": int(base.N_REPEATS), "llm_protocol": llm_protocol_config(), "current_60_134_status": "development/exploratory only" if not analysis_status.startswith("FINAL_") else "not used for confirmatory scoring", "holdout_overlap_audit": holdout_audit, "protocol_freeze": freeze, "generic_engine_self_tests": self_tests}
     (INTER / "05_v5_run_metadata.json").write_text(json.dumps(run_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     n_paid = int(manifest["paid_api_eligible"].sum())

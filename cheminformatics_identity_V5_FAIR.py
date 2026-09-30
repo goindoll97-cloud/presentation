@@ -17,8 +17,8 @@ except Exception:  # pragma: no cover
     Chem = None
     rdMolStandardize = None
 
-ENGINE_VERSION = "V5.1_FAIR_SALT_AWARE_FROZEN_2026-09-30"
-POLICY_VERSION = "parent-salt-policy-v5.1"
+ENGINE_VERSION = "V5.2_FAIR_SALT_AWARE_FROZEN_2026-09-30"
+POLICY_VERSION = "parent-salt-policy-v5.2"
 
 # Generic chemistry classes only. No benchmark-compound-specific SMARTS or CAS rules.
 _ACID_SMARTS = [
@@ -85,6 +85,26 @@ _BASE_MOLS = _compile(_BASE_SMARTS)
 _MINERAL_ACID_MOLS = _compile(_MINERAL_ACID_SMARTS)
 
 
+def _make_tautomer_enumerator():
+    """Tautomer canonicalizer that keeps sp3 stereocenters.
+
+    RDKit's default removes sp3 stereo at centers involved in tautomerism (e.g.
+    the alpha carbon of an amino acid), which would make enantiomers identical
+    and silently bypass the isomer-scope rule.
+    """
+    if rdMolStandardize is None:
+        return None
+    try:
+        params = rdMolStandardize.CleanupParameters()
+        params.tautomerRemoveSp3Stereo = False
+        return rdMolStandardize.TautomerEnumerator(params)
+    except Exception:
+        return rdMolStandardize.TautomerEnumerator()
+
+
+_TAUTOMER_ENUMERATOR = _make_tautomer_enumerator()
+
+
 def _standardize_fragment(mol):
     """Cleanup, normalize, uncharge and canonicalize tautomers for representation invariance."""
     if mol is None or Chem is None:
@@ -101,7 +121,7 @@ def _standardize_fragment(mol):
         except Exception:
             pass
         try:
-            m = rdMolStandardize.TautomerEnumerator().Canonicalize(m)
+            m = _TAUTOMER_ENUMERATOR.Canonicalize(m)
         except Exception:
             pass
     try:
@@ -243,7 +263,8 @@ def compare_salt_parent_v5(candidate_smiles: str, reference_smiles: str, isomer_
     * one or more parent fragments may occur (stoichiometric salts);
     * every remaining fragment must be a compatible counterion or common solvate;
     * covalent derivatives/analogs without the parent fragment are NO_MATCH;
-    * stereo-only differences follow the supplied frozen isomer-scope rule;
+    * a reference without defined stereochemistry covers all stereoisomers;
+    * otherwise stereo-only differences follow the supplied frozen isomer-scope rule;
     * ambiguous extra components are REVIEW, not MATCH.
     """
     if Chem is None:
@@ -298,6 +319,10 @@ def compare_salt_parent_v5(candidate_smiles: str, reference_smiles: str, isomer_
             suffix += "_WITH_" + "+".join(sorted(set(explanations)))
         return "MATCH", suffix
 
+    # A reference drawn without any stereochemistry does not restrict stereo, so
+    # every stereoisomer of the same connectivity is in scope.
+    if ref_iso == ref_conn:
+        return "MATCH", "PARENT_CONNECTIVITY_MATCH_REFERENCE_STEREO_UNDEFINED"
     scope = normalize_isomer_scope(isomer_scope)
     if scope == "ALL_STEREOISOMERS":
         return "MATCH", "PARENT_CONNECTIVITY_MATCH_ALL_STEREOISOMERS_RULE"
@@ -326,6 +351,9 @@ def generic_self_tests() -> list[dict]:
         ("acid_with_neutral_hcl_review", "O=C(O)c1ccccc1", "O=C(O)c1ccccc1.Cl", "REVIEW"),
         ("amine_with_neutral_metal_review", "Nc1ccccc1", "Nc1ccccc1.[Na]", "REVIEW"),
         ("amine_with_chlorinated_organic_review", "Nc1ccccc1", "Nc1ccccc1.ClCCCl", "REVIEW"),
+        # Stereochemistry
+        ("stereo_undefined_reference_covers_enantiomer", "CC(N)C(=O)O", "C[C@@H](N)C(=O)O", "MATCH"),
+        ("stereo_defined_reference_unspecified_scope_review", "C[C@@H](N)C(=O)O", "C[C@H](N)C(=O)O", "REVIEW"),
     ]
     out = []
     for name, ref, cand, expected in tests:

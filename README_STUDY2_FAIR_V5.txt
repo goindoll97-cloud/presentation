@@ -40,10 +40,14 @@ Salt-aware V5 deterministic policy
 - recognize PubChem-style neutral drawings of counterions: hydrohalic, nitric and
   other inorganic oxoacids drawn neutral (e.g. HCl as "Cl") for basic parents, and
   lone neutral metal atoms (e.g. "[Na]") for acidic parents (added in V5.1);
-- allow common solvate fragments;
+- allow common solvate fragments (water, methanol, ethanol, isopropanol, acetone,
+  acetonitrile, carbon dioxide, DMSO, 1,4-dioxane; the same list is in the prompt);
 - covalent derivatives/analogs without the same parent fragment are NO_MATCH;
 - unexplained components are REVIEW;
-- stereo-only differences use the same frozen isomer_scope supplied to the LLM.
+- a reference parent drawn without stereochemistry covers all stereoisomers (V5.2);
+- otherwise stereo-only differences use the same frozen isomer_scope supplied to the LLM;
+- tautomer canonicalization keeps sp3 stereocenters (RDKit's default would erase
+  e.g. an amino-acid alpha-carbon centre and make enantiomers identical) (V5.2).
 
 Critical inference rule
 -----------------------
@@ -65,7 +69,10 @@ The file must include at least:
 
 Recommended run order
 ---------------------
+Study 2 does not need Steps 01-03 (Study 1) or 04A/04B.
+
 A. Development fairness reanalysis
+   python 04C_prepare_dual_benchmark_METHODSAFE.py
    python 05_compare_identity_SHARED_DB_FAIR_V5.py
    # inspect dry-run files
    $env:IDENTITY_EXECUTE_CLAUDE="1"
@@ -75,6 +82,8 @@ A. Development fairness reanalysis
    python 07_visualize_identity_results_FAIR_V5.py
 
 B. Freeze protocol BEFORE final holdout evaluation
+   # set IDENTITY_ANTHROPIC_* exactly as for the final run; the freeze records the
+   # model, effort, max_tokens, repeats, system prompt and the V4 base-module hash
    python 04D_freeze_fair_v5_protocol.py
 
 C. Independent final holdout
