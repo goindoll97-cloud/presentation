@@ -10,6 +10,10 @@ Required order
 
 The freeze stores SHA256 for the holdout, protocol freeze, and Step 05. Step 05
 rechecks all three before any confirmatory evaluation.
+
+For confirmatory generalization, the final holdout is required to be BOTH
+candidate-CAS-disjoint and reference-parent-disjoint from the development data.
+It must also carry an explicit frozen isomer_scope for every row.
 """
 from __future__ import annotations
 
@@ -27,6 +31,12 @@ PROTOCOL_FREEZE = INTER / "04D_fair_v5_protocol_freeze.json"
 DEV_BENCHMARK = INTER / "04_identity_challenge_benchmark.csv"
 STEP05 = ROOT / "05_compare_identity_SHARED_DB_FAIR_V5.py"
 OUT = INTER / "04E_fair_v5_holdout_freeze.json"
+
+ALLOWED_ISOMER_SCOPES = {
+    "ALL_STEREOISOMERS",
+    "EXACT_STEREO_ONLY",
+    "UNSPECIFIED_REVIEW",
+}
 
 
 def clean(x) -> str:
@@ -62,7 +72,8 @@ def main() -> None:
 
     df = pd.read_csv(p, dtype=str).fillna("")
     required = [
-        "case_id", "rule_id", "candidate_cas", "reference_parent_smiles",
+        "case_id", "rule_id", "candidate_cas",
+        "reference_parent_cas", "reference_parent_smiles", "isomer_scope",
         "reference_membership", "reference_source",
     ]
     missing = [c for c in required if c not in df.columns]
@@ -74,20 +85,39 @@ def main() -> None:
         raise RuntimeError("Final holdout case_id must be unique")
     if not df["candidate_cas"].map(clean).ne("").all():
         raise RuntimeError("Every final-holdout row requires candidate_cas for the shared exact-CAS lookup")
+    if not df["reference_parent_cas"].map(clean).ne("").all():
+        raise RuntimeError("Every final-holdout row requires reference_parent_cas for parent-disjoint validation")
     if not df["reference_source"].map(clean).ne("").all():
         raise RuntimeError("Every final-holdout row requires an independent reference_source")
+
     labels = set(df["reference_membership"].map(lambda x: clean(x).upper()))
     if not labels.issubset({"MATCH", "NO_MATCH"}):
         raise RuntimeError(f"reference_membership must be MATCH/NO_MATCH only; found {sorted(labels)}")
 
+    scopes = set(df["isomer_scope"].map(lambda x: clean(x).upper()))
+    if "" in scopes or not scopes.issubset(ALLOWED_ISOMER_SCOPES):
+        raise RuntimeError(
+            "Every final-holdout row must have an explicit isomer_scope in "
+            f"{sorted(ALLOWED_ISOMER_SCOPES)}; found {sorted(scopes)}"
+        )
+
     hold_cas = set(df["candidate_cas"].map(clean))
-    overlap = []
+    hold_parent_cas = set(df["reference_parent_cas"].map(clean))
+    cas_overlap = []
+    parent_overlap = []
     if DEV_BENCHMARK.exists():
         dev = pd.read_csv(DEV_BENCHMARK, dtype=str).fillna("")
         dev_cas = {clean(x) for x in dev.get("candidate_cas", pd.Series(dtype=str)) if clean(x)}
-        overlap = sorted(hold_cas & dev_cas)
-        if overlap:
-            raise RuntimeError(f"Final holdout candidate-CAS overlaps development data: {overlap}")
+        dev_parent_cas = {clean(x) for x in dev.get("reference_parent_cas", pd.Series(dtype=str)) if clean(x)}
+        cas_overlap = sorted(hold_cas & dev_cas)
+        parent_overlap = sorted(hold_parent_cas & dev_parent_cas)
+        if cas_overlap:
+            raise RuntimeError(f"Final holdout candidate-CAS overlaps development data: {cas_overlap}")
+        if parent_overlap:
+            raise RuntimeError(
+                "Final holdout reference parent overlaps development data; "
+                f"confirmatory holdout must be parent-disjoint: {parent_overlap}"
+            )
 
     protocol = json.loads(PROTOCOL_FREEZE.read_text(encoding="utf-8"))
     manifest = {
@@ -97,13 +127,20 @@ def main() -> None:
         "holdout_sha256": sha256(p),
         "n_rows": int(len(df)),
         "n_unique_candidate_cas": int(df["candidate_cas"].map(clean).nunique()),
+        "n_unique_reference_parent_cas": int(df["reference_parent_cas"].map(clean).nunique()),
         "label_counts": {str(k): int(v) for k, v in df["reference_membership"].map(lambda x: clean(x).upper()).value_counts().items()},
-        "development_candidate_cas_overlap_n": int(len(overlap)),
-        "development_candidate_cas_overlap": overlap,
+        "isomer_scope_counts": {str(k): int(v) for k, v in df["isomer_scope"].map(lambda x: clean(x).upper()).value_counts().items()},
+        "development_candidate_cas_overlap_n": int(len(cas_overlap)),
+        "development_candidate_cas_overlap": cas_overlap,
+        "development_reference_parent_cas_overlap_n": int(len(parent_overlap)),
+        "development_reference_parent_cas_overlap": parent_overlap,
         "protocol_frozen_at_utc": protocol.get("frozen_at_utc", ""),
         "protocol_freeze_sha256": sha256(PROTOCOL_FREEZE),
         "step05_sha256": sha256(STEP05),
-        "statement": "Exact holdout bytes frozen before any FAIR-V5 Step-05 evaluation.",
+        "statement": (
+            "Exact holdout bytes frozen before FAIR-V5 Step-05 evaluation; "
+            "candidate-CAS-disjoint and reference-parent-disjoint from development data."
+        ),
     }
     OUT.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
