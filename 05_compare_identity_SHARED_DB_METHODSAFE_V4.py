@@ -997,7 +997,8 @@ def main() -> None:
             futs = {ex.submit(run_one_llm, row, "DB_INFORMED", rep): row for row in records}
             for fut in as_completed(futs):
                 llm_rows.append(fut.result()); done += 1
-                if done % 10 == 0 or done == len(records):                    elapsed = max(0.001, time.perf_counter() - batch_t0)
+                if done % 10 == 0 or done == len(records):
+                    elapsed = max(0.001, time.perf_counter() - batch_t0)
                     print(f"  {done}/{len(records)} | {elapsed/done:.1f} wall-s/completed-case")
         batch_wall = float(time.perf_counter() - batch_t0)
         batch_runtime_rows.append({
