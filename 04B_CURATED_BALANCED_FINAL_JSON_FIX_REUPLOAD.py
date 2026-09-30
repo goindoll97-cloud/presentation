@@ -19,8 +19,10 @@ intermediate/04_identity_challenge_by_difficulty.csv
 intermediate/04_identity_challenge_qc.csv
 intermediate/04_identity_benchmark_readiness.json
 
-Compatible with:
-    05_compare_identity_SHARED_DB_FINAL_V2.py
+Next steps:
+    04C_prepare_dual_benchmark_METHODSAFE.py
+    05_compare_identity_SHARED_DB_METHODSAFE_V4.py
+    06_make_identity_results_METHODSAFE_V4.py
 """
 
 from __future__ import annotations
@@ -223,7 +225,7 @@ def main():
     print(diff_tab.to_string())
 
     if ready:
-        print("\n[READY] Run 05_compare_identity_SHARED_DB_FINAL_V2.py with Claude still disabled first.")
+        print("\n[READY] Run 04C_prepare_dual_benchmark_METHODSAFE.py next, then dry-run 05_compare_identity_SHARED_DB_METHODSAFE_V4.py with Claude disabled.")
     else:
         print("\n[BLOCKED] Do not enable Claude. Inspect failed_checks above.")
 
