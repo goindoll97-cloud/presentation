@@ -44,7 +44,6 @@ def load_dotenv() -> None:
             pass
 
 
-# Load before reading experiment settings from the environment.
 load_dotenv()
 
 ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
@@ -84,7 +83,6 @@ Return REVIEW when the supplied information is insufficient to support a chemica
 You cannot independently browse or call tools. Use only the supplied fields.
 Return only the requested JSON object."""
 
-# Step 05 installs the frozen FAIR-V5 prompt builder here before any model call.
 _PROMPT_BUILDER: Callable[[pd.Series, str], str] | None = None
 
 
@@ -112,7 +110,6 @@ def clean(x) -> str:
     return "" if s.lower() in {"nan", "none", "null", "<na>"} else s
 
 
-# ------------------------- PubChem shared lookup -------------------------
 PUBCHEM_API_ROOT = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 PUBCHEM_CACHE_COLUMNS = [
     "cas", "structure_status", "pubchem_cid", "pubchem_title",
@@ -159,7 +156,9 @@ def _pubchem_json(url: str, timeout: int = 30, retries: int = PUBCHEM_RETRIES) -
                         retry_after = float(retry_after) if retry_after else 0.0
                     except Exception:
                         retry_after = 0.0
-                    time.sleep(max(retry_after, min(30.0, 2 ** attempt)))
+                    delay = max(retry_after, min(30.0, 2 ** attempt))
+                    print(f"[PUBCHEM RETRY] HTTP {r.status_code} attempt {attempt + 1}/{retries}; sleep {delay:.1f}s", flush=True)
+                    time.sleep(delay)
                     continue
             r.raise_for_status()
             return r.json()
@@ -168,7 +167,9 @@ def _pubchem_json(url: str, timeout: int = 30, retries: int = PUBCHEM_RETRIES) -
         except Exception as exc:
             last = exc
             if attempt + 1 < retries:
-                time.sleep(min(30.0, 2 ** attempt))
+                delay = min(30.0, 2 ** attempt)
+                print(f"[PUBCHEM RETRY] {type(exc).__name__} attempt {attempt + 1}/{retries}; sleep {delay:.1f}s", flush=True)
+                time.sleep(delay)
     raise RuntimeError(f"{type(last).__name__}: {last}") from last
 
 
@@ -260,8 +261,10 @@ def enrich_inventory_with_pubchem(inventory: pd.DataFrame, cache_file: Path) -> 
     if "smiles" not in out.columns:
         out["smiles"] = ""
     cache = {} if PUBCHEM_COLD_START else _load_pubchem_cache(cache_file)
+    total = len(out)
+    print(f"[PUBCHEM] Starting shared exact-CAS structure resolution: {total} rows; cached CAS={len(cache)}", flush=True)
     audit_rows, chosen_smiles, statuses, sources, cids, urls, lookup_seconds, lookup_modes = [], [], [], [], [], [], [], []
-    for idx, row in out.iterrows():
+    for pos, (idx, row) in enumerate(out.iterrows(), start=1):
         t0 = time.perf_counter()
         cas = normalize_cas(row.get("cas"))
         supplied = clean(row.get("smiles"))
@@ -274,6 +277,7 @@ def enrich_inventory_with_pubchem(inventory: pd.DataFrame, cache_file: Path) -> 
             usable = rec is not None and clean(rec.get("structure_status")) != "PUBCHEM_REQUEST_ERROR"
             mode = "CACHE_HIT" if usable else ("NETWORK_LOOKUP" if rec is None else "NETWORK_RETRY")
             if not usable:
+                print(f"[PUBCHEM {pos}/{total}] CAS {cas}: network lookup...", flush=True)
                 rec = fetch_pubchem_structure_by_cas(cas)
                 if clean(rec.get("structure_status")) == "PUBCHEM_REQUEST_ERROR":
                     if cache:
@@ -292,14 +296,15 @@ def enrich_inventory_with_pubchem(inventory: pd.DataFrame, cache_file: Path) -> 
         cids.append(clean(rec.get("pubchem_cid"))); urls.append(clean(rec.get("pubchem_record_url")))
         lookup_seconds.append(elapsed); lookup_modes.append(mode)
         audit_rows.append({"inventory_row": idx, **{c: clean(rec.get(c)) for c in PUBCHEM_CACHE_COLUMNS}, "lookup_mode": mode, "lookup_elapsed_sec": elapsed})
+        print(f"[PUBCHEM {pos}/{total}] CAS {cas}: {clean(rec.get('structure_status'))} ({mode}, {elapsed:.2f}s)", flush=True)
     out["smiles"] = chosen_smiles; out["structure_status"] = statuses; out["structure_smiles_source"] = sources
     out["pubchem_cid"] = cids; out["pubchem_record_url"] = urls; out["structure_lookup_elapsed_sec"] = lookup_seconds; out["structure_lookup_mode"] = lookup_modes
     if cache:
         _save_pubchem_cache(cache_file, cache)
+    print(f"[PUBCHEM] Completed shared structure resolution: {total}/{total}", flush=True)
     return out, pd.DataFrame(audit_rows)
 
 
-# ------------------------- Anthropic shared runtime -------------------------
 def api_key() -> str:
     return clean(os.getenv("ANTHROPIC_API_KEY", ""))
 
