@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from 00_validation_common import REPO_ROOT, DATA, SOURCES, split_input_gold, write_csv
+from validation_common import REPO_ROOT, SOURCES, split_input_gold, write_csv
 
 SRC = REPO_ROOT / "data" / "identity_e2e_v6_72.csv"
 
