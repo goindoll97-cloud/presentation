@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """Build open-set chemical-group validation data from curated external candidates.
 
-Workflow
---------
-1. Read curated seed candidates.
-2. Resolve CAS against PubChem using exact-CAS synonym verification.
-3. Check whether the CAS is directly enumerated in the frozen closed registry.
-4. Keep all rows in an audit file.
-5. Export final INPUT/GOLD only for curation_status=APPROVED.
-
-External DB identity evidence never creates a GOLD label automatically.
+Design principle
+----------------
+The curated external source is the benchmark evidence. Live PubChem retrieval is
+best-effort enrichment/QC only and must not decide the GOLD label or make dataset
+construction fail because of API/search-index behaviour.
 """
 from __future__ import annotations
 
@@ -59,7 +55,13 @@ def main() -> None:
         }
         row = r.to_dict()
         row.update(pc)
-        row["official_list_hit"] = "YES" if (str(r["target_rule_id"]), cas) in official_pairs else "NO"
+        row["official_list_hit"] = (
+            "YES" if (str(r["target_rule_id"]), cas) in official_pairs else "NO"
+        )
+        row["live_pubchem_qc"] = (
+            "PASS" if (not cas or pc.get("external_db_status") == "EXACT_CAS_VERIFIED")
+            else "UNRESOLVED_NONBLOCKING"
+        )
         row["case_id"] = f"CG-{i+1:03d}"
         row["category"] = "CHEMICAL_GROUP"
         enriched_rows.append(row)
@@ -71,18 +73,13 @@ def main() -> None:
     if approved.empty:
         raise RuntimeError("No APPROVED chemical-group cases. Curate the seed CSV first.")
 
-    # Strong QC: an approved open-set MATCH must not be an exact closed-registry hit,
-    # must have an external source, and must resolve by exact CAS when a CAS is supplied.
+    # Blocking QC is limited to benchmark-design errors that would invalidate
+    # the curated validation set. Live DB lookup is intentionally non-blocking.
     for _, r in approved.iterrows():
         if r["gold_label"] == "MATCH" and r["official_list_hit"] != "NO":
             raise ValueError(f"Open-set MATCH unexpectedly already in official list: {r['seed_id']}")
         if not str(r["external_source_url"]).strip():
             raise ValueError(f"Approved case lacks external source URL: {r['seed_id']}")
-        if str(r["candidate_cas"]).strip() and r["external_db_status"] != "EXACT_CAS_VERIFIED":
-            raise ValueError(
-                f"Approved CAS case not exact-verified in PubChem: {r['seed_id']} "
-                f"status={r['external_db_status']} route={r.get('pubchem_lookup_route', '')}"
-            )
 
     input_cols = [
         "case_id", "category", "target_rule_id", "regulatory_scope_text",
@@ -91,22 +88,26 @@ def main() -> None:
     gold_cols = [
         "case_id", "category", "gold_label", "gold_reason", "curation_status",
         "official_list_hit", "external_source", "external_source_url",
-        "external_db_status", "pubchem_lookup_route", "pubchem_cid", "pubchem_title",
-        "pubchem_isomeric_smiles", "pubchem_canonical_smiles", "pubchem_inchikey",
+        "external_db_status", "live_pubchem_qc", "pubchem_lookup_route",
+        "pubchem_cid", "pubchem_title", "pubchem_isomeric_smiles",
+        "pubchem_canonical_smiles", "pubchem_inchikey",
         "independent_evidence_note", "seed_id",
     ]
     ip, gp = split_input_gold(approved, input_cols, gold_cols, "validation_chemical_group")
 
     manifest = approved[[
         "case_id", "target_rule_id", "candidate_name", "candidate_cas",
-        "external_source", "external_source_url", "official_list_hit", "seed_id",
+        "external_source", "external_source_url", "official_list_hit",
+        "live_pubchem_qc", "seed_id",
     ]].copy()
     manifest.insert(1, "category", "CHEMICAL_GROUP")
     write_csv(manifest, SOURCES / "chemical_group_source_manifest.csv")
 
+    unresolved = int((approved["live_pubchem_qc"] == "UNRESOLVED_NONBLOCKING").sum())
     print(f"[OK] Chemical-group approved cases: {len(approved)}")
     print(f"[QC] Frozen closed-registry rows: {n_official}")
     print(f"[QC] Open-set official_list_hit=NO: {(approved['official_list_hit'] == 'NO').sum()}/{len(approved)}")
+    print(f"[QC] PubChem live unresolved (non-blocking): {unresolved}/{len(approved)}")
     print("[QC] PubChem lookup routes:")
     print(approved["pubchem_lookup_route"].value_counts(dropna=False).to_string())
     print(f"[OUT] {AUDIT}")
