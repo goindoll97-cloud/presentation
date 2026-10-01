@@ -24,6 +24,17 @@ INTER = ROOT / "intermediate"
 INTER.mkdir(parents=True, exist_ok=True)
 PROTOCOL_FREEZE = ROOT / "EVAL_PROTOCOL_FREEZE.json"
 GATE_FILE = INTER / "hybrid_gate_preflight.csv"
+PROMPT_MANIFEST = INTER / "prompt_manifest.csv"
+RETRIEVAL_FREEZE = ROOT / "RETRIEVAL_DATASET_FREEZE.json"
+PUBCHEM_FREEZE = ROOT / "SHARED_PUBCHEM_FREEZE.json"
+ATTEMPT_LOG = INTER / "llm_attempt_log.csv"
+# Fixed schema: error rows lack some fields, and appending frames with differing
+# column order under one header would silently misalign the log.
+ATTEMPT_LOG_COLUMNS = [
+    "run_at_utc", "condition", "repeat", "query_id", "call_status", "status", "target_id",
+    "confidence", "api_attempts", "unparseable_responses", "stop_reason", "model_returned",
+    "input_tokens", "output_tokens", "elapsed_sec", "runtime_source",
+]
 LLM_CALLS = INTER / "llm_only_calls.csv"
 HYBRID_CALLS = INTER / "hybrid_review_calls.csv"
 PREDICTIONS = INTER / "retrieval_predictions_caselevel.csv"
@@ -62,6 +73,11 @@ def verify_protocol() -> tuple[dict, dict]:
         "retrieval_runtime.py": files.get("retrieval_runtime.py") == sha256(ROOT / "retrieval_runtime.py"),
         "04_run_retrieval_llm_hybrid.py": files.get("04_run_retrieval_llm_hybrid.py") == sha256(Path(__file__).resolve()),
         "hybrid_gate_preflight.csv": files.get("intermediate/hybrid_gate_preflight.csv") == sha256(GATE_FILE),
+        # Re-running 01/02 after 03 rewrites these; load_inputs() alone would accept
+        # the new data because it only compares against the newest freeze files.
+        "RETRIEVAL_DATASET_FREEZE.json": files.get("RETRIEVAL_DATASET_FREEZE.json") == sha256(RETRIEVAL_FREEZE),
+        "SHARED_PUBCHEM_FREEZE.json": files.get("SHARED_PUBCHEM_FREEZE.json") == sha256(PUBCHEM_FREEZE),
+        "prompt_manifest.csv": files.get("intermediate/prompt_manifest.csv") == sha256(PROMPT_MANIFEST),
         "parent_engine_sha256": files.get("../cheminformatics_identity_V5_FAIR.py") == sha256(ec.PARENT_ENGINE),
         "runtime_contract": runtime_now == runtime_frozen,
         "rdkit_version": ec.clean(engine_now.get("rdkit_version")) == ec.clean(engine_frozen.get("rdkit_version")),
@@ -76,6 +92,34 @@ def verify_protocol() -> tuple[dict, dict]:
     return checks, f
 
 
+def verify_prompts_and_gate(qin: pd.DataFrame, catalog: pd.DataFrame, smap: dict) -> dict:
+    """Recompute every prompt and gate decision and require equality with the 03 freeze."""
+    manifest = pd.read_csv(PROMPT_MANIFEST, dtype=str).fillna("")
+    frozen_prompt = {
+        (r.query_id, r.condition): r.prompt_sha256 for r in manifest.itertuples(index=False)
+    }
+    frozen_gate = pd.read_csv(GATE_FILE, dtype=str).fillna("").set_index("query_id")
+    prompt_mismatch, gate_mismatch = [], []
+    for _, row in qin.iterrows():
+        qid = ec.clean(row.get("query_id"))
+        h = hashlib.sha256(ec.build_prompt(row, catalog, smap).encode("utf-8")).hexdigest()
+        if frozen_prompt.get((qid, "LLM_ONLY")) != h:
+            prompt_mismatch.append(qid)
+        now = ec.gate_query(row, catalog, smap)
+        was = frozen_gate.loc[qid] if qid in frozen_gate.index else None
+        if was is None or any(
+            ec.clean(now[k]) != ec.clean(was[k])
+            for k in ["gate_status", "gate_target_id", "gate_reason"]
+        ):
+            gate_mismatch.append(qid)
+    if prompt_mismatch or gate_mismatch:
+        raise RuntimeError(
+            "Prompts or Hybrid gate decisions differ from the 03 freeze: "
+            + json.dumps({"prompt": prompt_mismatch[:20], "gate": gate_mismatch[:20]})
+        )
+    return {"prompts_recomputed_equal": True, "gate_recomputed_equal": True}
+
+
 def run_interleaved(qin: pd.DataFrame, review_ids: set[str], catalog: pd.DataFrame, smap: dict):
     allowed = set(catalog["target_id"].astype(str))
     llm_out, hy_out = [], []
@@ -83,18 +127,16 @@ def run_interleaved(qin: pd.DataFrame, review_ids: set[str], catalog: pd.DataFra
         for _, row in qin.iterrows():
             qid = ec.clean(row.get("query_id"))
             prompt = ec.build_prompt(row, catalog, smap)
-            ans = rt.run_one(qid, prompt, "LLM_ONLY", repeat, allowed)
-            llm_out.append(ans)
-            print(
-                f"[LLM_ONLY] repeat={repeat} query={qid} status={ans.get('status')} "
-                f"target={ans.get('target_id')} call={ans.get('call_status')}", flush=True
-            )
-            if qid in review_ids:
-                hans = rt.run_one(qid, prompt, "HYBRID_REVIEW", repeat, allowed)
-                hy_out.append(hans)
+            conditions = ["LLM_ONLY"] + (["HYBRID_REVIEW"] if qid in review_ids else [])
+            # Alternate which condition is called first so neither is systematically earlier.
+            if repeat % 2 == 0:
+                conditions.reverse()
+            for condition in conditions:
+                ans = rt.run_one(qid, prompt, condition, repeat, allowed)
+                (llm_out if condition == "LLM_ONLY" else hy_out).append(ans)
                 print(
-                    f"[HYBRID_REVIEW] repeat={repeat} query={qid} status={hans.get('status')} "
-                    f"target={hans.get('target_id')} call={hans.get('call_status')}", flush=True
+                    f"[{condition}] repeat={repeat} query={qid} status={ans.get('status')} "
+                    f"target={ans.get('target_id')} call={ans.get('call_status')}", flush=True
                 )
     return pd.DataFrame(llm_out), pd.DataFrame(hy_out)
 
@@ -133,6 +175,7 @@ def consensus_map(calls: pd.DataFrame) -> dict[str, tuple[str, str]]:
 def main() -> None:
     protocol_checks, frozen_protocol = verify_protocol()
     qin, catalog, smap, frozen_checks = ec.load_inputs()
+    protocol_checks.update(verify_prompts_and_gate(qin, catalog, smap))
     gate = pd.read_csv(GATE_FILE, dtype=str).fillna("")
     if set(gate["query_id"]) != set(qin["query_id"]):
         raise RuntimeError("Hybrid gate query set differs from frozen retrieval INPUT")
@@ -149,7 +192,8 @@ def main() -> None:
         "hybrid_review_queries": int((gate["gate_status"] == "REVIEW").sum()),
         "expected_llm_only_calls": int(len(qin) * rt.N_REPEATS),
         "expected_hybrid_llm_calls": int(len(review_ids) * rt.N_REPEATS),
-        "execution_order": "INTERLEAVED_BY_REPEAT_AND_QUERY",
+        "execution_order": "INTERLEAVED_BY_REPEAT_AND_QUERY_ALTERNATING_CONDITION_ORDER",
+        "force_fresh_calls": bool(rt.FORCE),
         "protocol_checks": protocol_checks,
         "frozen_input_checks": frozen_checks,
         "frozen_protocol_sha256": sha256(PROTOCOL_FREEZE),
@@ -164,6 +208,32 @@ def main() -> None:
     llm_calls, hy_calls = run_interleaved(qin, review_ids, catalog, smap)
     llm_calls.to_csv(LLM_CALLS, index=False, encoding="utf-8-sig")
     hy_calls.to_csv(HYBRID_CALLS, index=False, encoding="utf-8-sig")
+
+    # The call CSVs are overwritten on every rerun, so failed attempts would vanish.
+    # Keep an append-only log of every fresh attempt to report retry/selection effects.
+    fresh = pd.concat([llm_calls, hy_calls], ignore_index=True)
+    fresh = fresh[fresh["runtime_source"].astype(str).str.startswith("FRESH_API_CALL")].copy()
+    if len(fresh):
+        fresh["run_at_utc"] = meta["run_at_utc"]
+        fresh = fresh.reindex(columns=ATTEMPT_LOG_COLUMNS)
+        if ATTEMPT_LOG.exists():
+            header = list(pd.read_csv(ATTEMPT_LOG, nrows=0).columns)
+            if header != ATTEMPT_LOG_COLUMNS:
+                raise RuntimeError(f"{ATTEMPT_LOG.name} has an unexpected schema; move it aside")
+        fresh.to_csv(ATTEMPT_LOG, mode="a", header=not ATTEMPT_LOG.exists(),
+                     index=False, encoding="utf-8-sig")
+    if ATTEMPT_LOG.exists():
+        log = pd.read_csv(ATTEMPT_LOG, dtype=str).fillna("")
+        failed = log[~log["call_status"].eq("OK")]
+        ok = log[log["call_status"].eq("OK")]
+        unparse = pd.to_numeric(ok.get("unparseable_responses", pd.Series(dtype=str)), errors="coerce").fillna(0)
+        meta["attempt_log_summary"] = {
+            cond: {
+                "failed_outer_attempts": int(failed["condition"].eq(cond).sum()),
+                "unparseable_responses_before_success": int(unparse[ok["condition"].eq(cond)].sum()),
+            }
+            for cond in ["LLM_ONLY", "HYBRID_REVIEW"]
+        }
 
     llm_complete, llm_report = completeness_report(llm_calls, all_ids, "LLM_ONLY")
     hy_complete, hy_report = completeness_report(hy_calls, review_ids, "HYBRID_REVIEW")

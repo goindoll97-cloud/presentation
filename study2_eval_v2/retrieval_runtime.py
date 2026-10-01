@@ -52,11 +52,15 @@ EFFORT = os.getenv("RETRIEVAL_ANTHROPIC_EFFORT", "medium").strip().lower() or "m
 SAMPLING_MODE = "MODEL_DEFAULT_NO_TEMPERATURE_PARAMETER"
 FORCE = os.getenv("RETRIEVAL_FORCE_LLM", "0").strip().lower() in {"1", "true", "yes", "on"}
 
-PROMPT_VERSION = "study2-retrieval-cas-smiles-v1-20261001"
+PROMPT_VERSION = "study2-retrieval-cas-smiles-v2-isomer-scope-20261001"
 SYSTEM_PROMPT = """You are performing regulatory identity retrieval for a controlled chemical benchmark.
 You receive only candidate CAS identifier(s), PubChem-derived SMILES for those CAS identifiers,
 and a fixed regulatory catalog that is the search space.
 Find which single catalog target the candidate belongs to.
+A catalog entry's isomer_scope states which stereoisomers of its reference substance are covered.
+If the reference SMILES defines no stereochemistry, every stereoisomer is covered. Otherwise:
+ALL_STEREOISOMERS covers every stereoisomer; EXACT_STEREO_ONLY covers only the stereochemistry
+drawn in the reference SMILES; UNSPECIFIED_REVIEW means stereo-only differences cannot be decided.
 Return NOT_FOUND when none of the catalog targets applies.
 Return REVIEW only when the supplied CAS/SMILES/catalog information is insufficient to decide reliably.
 Do not use or infer hidden benchmark labels. Do not browse or use external knowledge beyond the supplied fields.
@@ -153,6 +157,9 @@ def call_anthropic(query_id: str, prompt: str) -> dict:
     }
 
     last = None
+    # Content-level failures (unparseable/truncated JSON) are resampled by the
+    # retry loop; count them so selection effects can be reported per condition.
+    unparseable = 0
     for attempt in range(1, 5):
         try:
             r = requests.post(ENDPOINT, headers=headers, json=body, timeout=TIMEOUT)
@@ -171,11 +178,20 @@ def call_anthropic(query_id: str, prompt: str) -> dict:
                 for p in (payload.get("content") or [])
                 if isinstance(p, dict) and p.get("type") == "text"
             ).strip()
-            raw = extract_json(text)
+            try:
+                raw = extract_json(text)
+            except ValueError:
+                unparseable += 1
+                raise ValueError(
+                    f"No JSON object in model response (stop_reason={payload.get('stop_reason')})"
+                )
             usage = payload.get("usage", {}) or {}
             raw["_model_returned"] = clean(payload.get("model")) or MODEL
             raw["_input_tokens"] = usage.get("input_tokens", "")
             raw["_output_tokens"] = usage.get("output_tokens", "")
+            raw["_api_attempts"] = attempt
+            raw["_unparseable_responses"] = unparseable
+            raw["_stop_reason"] = clean(payload.get("stop_reason"))
             return raw
         except Exception as exc:
             last = exc
@@ -203,6 +219,9 @@ def normalize(raw: dict, query_id: str, allowed_target_ids: set[str]) -> dict:
         "model_returned": clean(raw.get("_model_returned")),
         "input_tokens": raw.get("_input_tokens", ""),
         "output_tokens": raw.get("_output_tokens", ""),
+        "api_attempts": raw.get("_api_attempts", ""),
+        "unparseable_responses": raw.get("_unparseable_responses", ""),
+        "stop_reason": clean(raw.get("_stop_reason")),
     }
 
 

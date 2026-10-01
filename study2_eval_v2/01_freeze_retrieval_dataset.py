@@ -23,6 +23,7 @@ REPO_ROOT = ROOT.parent
 DATA = ROOT / "data"
 BUILDER = ROOT / "00_build_retrieval_benchmark.py"
 CORRECTOR = ROOT / "00a_apply_cas_corrections.py"
+GOLD_OVERRIDER = ROOT / "00b_apply_gold_overrides.py"
 REVIEW_PREP = ROOT / "01a_prepare_retrieval_gold_review.py"
 REVIEW_SIGNOFF = ROOT / "01b_retrieval_gold_signoff.py"
 CATALOG = DATA / "regulatory_catalog.csv"
@@ -32,6 +33,7 @@ EXCLUDED = DATA / "retrieval_EXCLUDED_NO_CAS.csv"
 CORRECTIONS = DATA / "retrieval_CAS_CORRECTIONS.csv"
 MANIFEST = DATA / "retrieval_build_manifest.json"
 REVIEW = ROOT / "review" / "retrieval_gold_manual_review.csv"
+GOLD_OVERRIDES = ROOT / "review" / "retrieval_gold_overrides.csv"
 VAL_FREEZE = REPO_ROOT / "validation_v2" / "VALIDATION_V2_FREEZE.json"
 OUT = ROOT / "RETRIEVAL_DATASET_FREEZE.json"
 
@@ -53,15 +55,16 @@ def valid_cas_checksum(cas: str) -> bool:
 
 
 def main() -> None:
-    for script in [BUILDER, CORRECTOR, REVIEW_PREP, REVIEW_SIGNOFF]:
+    for script in [BUILDER, CORRECTOR, GOLD_OVERRIDER, REVIEW_PREP, REVIEW_SIGNOFF]:
         if not script.exists():
             raise FileNotFoundError(script)
 
     subprocess.run([sys.executable, str(BUILDER)], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(CORRECTOR)], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(GOLD_OVERRIDER)], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(REVIEW_PREP)], cwd=ROOT, check=True)
 
-    for p in [CATALOG, QINPUT, QGOLD, EXCLUDED, CORRECTIONS, MANIFEST, REVIEW, VAL_FREEZE]:
+    for p in [CATALOG, QINPUT, QGOLD, EXCLUDED, CORRECTIONS, MANIFEST, REVIEW, GOLD_OVERRIDES, VAL_FREEZE]:
         if not p.exists():
             raise FileNotFoundError(p)
 
@@ -136,6 +139,21 @@ def main() -> None:
         bool(len(required) > 0 and approved.all() and not rejected.any() and not pending.any()),
         f"approved={int(approved.sum())}, pending={int(pending.sum())}, rejected={int(rejected.sum())}")
 
+    # A NOT_FOUND (or other) GOLD whose CAS is listed under a different catalog target
+    # must not be approved silently: it needs a GOLD override or an explicit per-row note.
+    conflict = required.apply(
+        lambda r: bool(r["catalog_exact_hit_precheck"])
+        and r["derived_gold_target_id"] not in r["catalog_exact_hit_precheck"].split("|"),
+        axis=1,
+    ) if len(required) else pd.Series(dtype=bool)
+    unresolved = required[conflict & ~(
+        required["researcher_status"].str.upper().eq("APPROVED")
+        & required["researcher_note"].str.startswith("CONFLICT_RESOLVED:")
+    )] if len(required) else required
+    add("exact_hit_conflicts_resolved", unresolved.empty,
+        unresolved[["query_id", "cas_inputs", "derived_gold_target_id",
+                    "catalog_exact_hit_precheck"]].to_dict("records")[:10])
+
     ps = catalog[catalog["target_type"].eq("PARENT_SALT")]
     add("parent_salt_isomer_scope_explicit",
         bool(len(ps) and ps["isomer_scope"].astype(str).str.len().gt(0).all()),
@@ -165,6 +183,8 @@ def main() -> None:
         "catalog_type_counts": {str(k): int(v) for k, v in catalog["target_type"].value_counts().to_dict().items()},
         "retrieval_scope_review_required": int(len(required)),
         "retrieval_scope_review_approved": int(approved.sum()),
+        "exact_hit_conflicts_resolved_by_note": int(conflict.sum()) if len(required) else 0,
+        "gold_overrides": build.get("gold_overrides", []),
         "excluded_no_cas_pairwise_rows": int(len(excluded)),
         "excluded_no_cas_unique_targets": int(build.get("excluded_no_cas_unique_targets", 0)),
         "candidate_input_policy": (
@@ -187,6 +207,8 @@ def main() -> None:
         "sha256": {
             "00_build_retrieval_benchmark.py": sha256(BUILDER),
             "00a_apply_cas_corrections.py": sha256(CORRECTOR),
+            "00b_apply_gold_overrides.py": sha256(GOLD_OVERRIDER),
+            "review/retrieval_gold_overrides.csv": sha256(GOLD_OVERRIDES),
             "01a_prepare_retrieval_gold_review.py": sha256(REVIEW_PREP),
             "01b_retrieval_gold_signoff.py": sha256(REVIEW_SIGNOFF),
             "retrieval_build_manifest.json": sha256(MANIFEST),

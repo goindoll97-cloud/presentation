@@ -144,6 +144,11 @@ def catalog_payload(catalog: pd.DataFrame, smap: dict) -> list[dict]:
         refs = split_cas(getattr(r, "reference_cas_set", ""))
         if refs:
             entry["reference_substances"] = [cas_record(c, smap) for c in refs]
+        # The Hybrid gate applies this frozen target-level rule, so the LLM must
+        # see the same (normalized) rule; otherwise the systems judge different scopes.
+        iso = clean(getattr(r, "isomer_scope", ""))
+        if iso:
+            entry["isomer_scope"] = parent_engine().normalize_isomer_scope(iso)
         members = split_cas(getattr(r, "official_member_cas_set", ""))
         if members:
             entry["official_enumerated_members"] = [cas_record(c, smap) for c in members]

@@ -133,9 +133,12 @@ def main() -> None:
     out.to_csv(OUT, index=False, encoding="utf-8-sig")
     required = out[out["review_required"].eq("YES")]
     counts = required["researcher_status"].value_counts().to_dict()
-    conflicts = required[required["catalog_exact_hit_precheck"].astype(str).str.len().gt(0)]
+    conflicts = required[[
+        bool(h) and g not in h.split("|")
+        for h, g in zip(required["catalog_exact_hit_precheck"], required["derived_gold_target_id"])
+    ]]
     print(f"[RETRIEVAL GOLD REVIEW] required={len(required)} status={counts}")
-    print(f"[PRECHECK] review-required rows with exact catalog hit={len(conflicts)}")
+    print(f"[PRECHECK] review-required rows whose CAS hits a different catalog target={len(conflicts)}")
     if len(conflicts):
         print(conflicts[["query_id", "cas_inputs", "catalog_exact_hit_precheck"]].to_string(index=False))
     print(f"[OUT] {OUT}")
