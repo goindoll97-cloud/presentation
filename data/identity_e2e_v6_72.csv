@@ -1,0 +1,73 @@
+case_id,regulatory_scope_text,reference_parent_name,reference_parent_cas,candidate_name,candidate_cas,reference_membership,challenge_class,difficulty,isomer_scope
+FINALV5_001,Benzoic acid and its salts,Benzoic acid,65-85-0,Sodium benzoate,532-32-1,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_002,Benzoic acid and its salts,Benzoic acid,65-85-0,Potassium benzoate,582-25-2,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_003,Benzoic acid and its salts,Benzoic acid,65-85-0,Calcium benzoate,2090-05-3,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_004,Benzoic acid and its salts,Benzoic acid,65-85-0,Ammonium benzoate,1863-63-4,MATCH,ammonium_salt,medium,ALL_STEREOISOMERS
+FINALV5_005,Benzoic acid and its salts,Benzoic acid,65-85-0,Methyl benzoate,93-58-3,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_006,Benzoic acid and its salts,Benzoic acid,65-85-0,Ethyl benzoate,93-89-0,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_007,Benzoic acid and its salts,Benzoic acid,65-85-0,Benzyl benzoate,120-51-4,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_008,Benzoic acid and its salts,Benzoic acid,65-85-0,Benzamide,55-21-0,NO_MATCH,covalent_amide,medium,ALL_STEREOISOMERS
+FINALV5_009,Salicylic acid and its salts,Salicylic acid,69-72-7,Sodium salicylate,54-21-7,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_010,Salicylic acid and its salts,Salicylic acid,69-72-7,Potassium salicylate,578-36-9,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_011,Salicylic acid and its salts,Salicylic acid,69-72-7,Calcium salicylate,824-35-1,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_012,Salicylic acid and its salts,Salicylic acid,69-72-7,Magnesium salicylate,18917-89-0,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_013,Salicylic acid and its salts,Salicylic acid,69-72-7,Methyl salicylate,119-36-8,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_014,Salicylic acid and its salts,Salicylic acid,69-72-7,Aspirin,50-78-2,NO_MATCH,covalent_derivative,hard,ALL_STEREOISOMERS
+FINALV5_015,Salicylic acid and its salts,Salicylic acid,69-72-7,Salicylamide,65-45-2,NO_MATCH,covalent_amide,medium,ALL_STEREOISOMERS
+FINALV5_016,Salicylic acid and its salts,Salicylic acid,69-72-7,4-Hydroxybenzoic acid,99-96-7,NO_MATCH,positional_isomer_analog,hard,ALL_STEREOISOMERS
+FINALV5_017,Citric acid and its salts,Citric acid,77-92-9,Trisodium citrate,68-04-2,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_018,Citric acid and its salts,Citric acid,77-92-9,Tripotassium citrate,866-84-2,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_019,Citric acid and its salts,Citric acid,77-92-9,Tricalcium citrate,813-94-5,MATCH,multivalent_counterion_salt,hard,ALL_STEREOISOMERS
+FINALV5_020,Citric acid and its salts,Citric acid,77-92-9,Diammonium citrate,3012-65-5,MATCH,ammonium_salt,hard,ALL_STEREOISOMERS
+FINALV5_021,Citric acid and its salts,Citric acid,77-92-9,Triethyl citrate,77-93-0,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_022,Citric acid and its salts,Citric acid,77-92-9,Acetyl tributyl citrate,77-90-7,NO_MATCH,covalent_derivative,hard,ALL_STEREOISOMERS
+FINALV5_023,Citric acid and its salts,Citric acid,77-92-9,Tricarballylic acid,99-14-9,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_024,Citric acid and its salts,Citric acid,77-92-9,Malic acid,6915-15-7,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_025,Lactic acid and its salts,Lactic acid,50-21-5,Sodium lactate,72-17-3,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_026,Lactic acid and its salts,Lactic acid,50-21-5,Potassium lactate,996-31-6,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_027,Lactic acid and its salts,Lactic acid,50-21-5,Calcium lactate,814-80-2,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_028,Lactic acid and its salts,Lactic acid,50-21-5,Magnesium lactate,18917-93-6,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_029,Lactic acid and its salts,Lactic acid,50-21-5,Methyl lactate,547-64-8,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_030,Lactic acid and its salts,Lactic acid,50-21-5,Ethyl lactate,97-64-3,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_031,Lactic acid and its salts,Lactic acid,50-21-5,Lactamide,598-81-2,NO_MATCH,covalent_amide,medium,ALL_STEREOISOMERS
+FINALV5_032,Lactic acid and its salts,Lactic acid,50-21-5,Pyruvic acid,127-17-3,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_033,Oxalic acid and its salts,Oxalic acid,144-62-7,Sodium oxalate,62-76-0,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_034,Oxalic acid and its salts,Oxalic acid,144-62-7,Dipotassium oxalate,583-52-8,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_035,Oxalic acid and its salts,Oxalic acid,144-62-7,Calcium oxalate,563-72-4,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_036,Oxalic acid and its salts,Oxalic acid,144-62-7,Ammonium oxalate,1113-38-8,MATCH,ammonium_salt,medium,ALL_STEREOISOMERS
+FINALV5_037,Oxalic acid and its salts,Oxalic acid,144-62-7,Dimethyl oxalate,553-90-2,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_038,Oxalic acid and its salts,Oxalic acid,144-62-7,Diethyl oxalate,95-92-1,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_039,Oxalic acid and its salts,Oxalic acid,144-62-7,Oxamide,471-46-5,NO_MATCH,covalent_amide,medium,ALL_STEREOISOMERS
+FINALV5_040,Oxalic acid and its salts,Oxalic acid,144-62-7,Malonic acid,141-82-2,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_041,Succinic acid and its salts,Succinic acid,110-15-6,Succinic acid,110-15-6,MATCH,exact_parent,easy,ALL_STEREOISOMERS
+FINALV5_042,Succinic acid and its salts,Succinic acid,110-15-6,Sodium succinate,150-90-3,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_043,Succinic acid and its salts,Succinic acid,110-15-6,Potassium succinate,676-47-1,MATCH,multivalent_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_044,Succinic acid and its salts,Succinic acid,110-15-6,Calcium succinate monohydrate,159389-75-0,MATCH,salt_plus_solvate,hard,ALL_STEREOISOMERS
+FINALV5_045,Succinic acid and its salts,Succinic acid,110-15-6,Dimethyl succinate,106-65-0,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_046,Succinic acid and its salts,Succinic acid,110-15-6,Diethyl succinate,123-25-1,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_047,Succinic acid and its salts,Succinic acid,110-15-6,Succinimide,123-56-8,NO_MATCH,covalent_cyclic_derivative,hard,ALL_STEREOISOMERS
+FINALV5_048,Succinic acid and its salts,Succinic acid,110-15-6,Glutaric acid,110-94-1,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_049,Guanidine and its salts,Guanidine,113-00-8,Guanidine,113-00-8,MATCH,exact_parent,easy,ALL_STEREOISOMERS
+FINALV5_050,Guanidine and its salts,Guanidine,113-00-8,Guanidine hydrochloride,50-01-1,MATCH,mineral_acid_salt,medium,ALL_STEREOISOMERS
+FINALV5_051,Guanidine and its salts,Guanidine,113-00-8,Guanidine nitrate,506-93-4,MATCH,mineral_acid_salt,medium,ALL_STEREOISOMERS
+FINALV5_052,Guanidine and its salts,Guanidine,113-00-8,Guanidine carbonate,593-85-1,MATCH,counterion_salt,hard,ALL_STEREOISOMERS
+FINALV5_053,Guanidine and its salts,Guanidine,113-00-8,Methylguanidine,471-29-4,NO_MATCH,covalent_substituted_analog,hard,ALL_STEREOISOMERS
+FINALV5_054,Guanidine and its salts,Guanidine,113-00-8,Urea,57-13-6,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_055,Guanidine and its salts,Guanidine,113-00-8,Cyanamide,420-04-2,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
+FINALV5_056,Guanidine and its salts,Guanidine,113-00-8,Creatine,57-00-1,NO_MATCH,covalent_substituted_analog,hard,ALL_STEREOISOMERS
+FINALV5_057,Piperazine and its salts,Piperazine,110-85-0,Piperazine dihydrochloride,142-64-3,MATCH,mineral_acid_salt,medium,ALL_STEREOISOMERS
+FINALV5_058,Piperazine and its salts,Piperazine,110-85-0,Piperazine citrate,144-29-6,MATCH,organic_acid_salt,hard,ALL_STEREOISOMERS
+FINALV5_059,Piperazine and its salts,Piperazine,110-85-0,Piperazine adipate,142-88-1,MATCH,organic_acid_salt,hard,ALL_STEREOISOMERS
+FINALV5_060,Piperazine and its salts,Piperazine,110-85-0,Piperazine hexahydrate,142-63-2,MATCH,solvate_hydrate,hard,ALL_STEREOISOMERS
+FINALV5_061,Piperazine and its salts,Piperazine,110-85-0,1-Methylpiperazine,109-01-3,NO_MATCH,covalent_substituted_analog,hard,ALL_STEREOISOMERS
+FINALV5_062,Piperazine and its salts,Piperazine,110-85-0,2-Methylpiperazine,109-07-9,NO_MATCH,covalent_substituted_analog,hard,ALL_STEREOISOMERS
+FINALV5_063,Piperazine and its salts,Piperazine,110-85-0,"1,4-Dimethylpiperazine",106-58-1,NO_MATCH,covalent_substituted_analog,hard,ALL_STEREOISOMERS
+FINALV5_064,Piperazine and its salts,Piperazine,110-85-0,"Piperazine-2,5-dione",106-57-0,NO_MATCH,covalent_oxidized_analog,hard,ALL_STEREOISOMERS
+FINALV5_065,Acetic acid and its salts,Acetic acid,64-19-7,Acetic acid,64-19-7,MATCH,exact_parent,easy,ALL_STEREOISOMERS
+FINALV5_066,Acetic acid and its salts,Acetic acid,64-19-7,Sodium acetate,127-09-3,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_067,Acetic acid and its salts,Acetic acid,64-19-7,Potassium acetate,127-08-2,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_068,Acetic acid and its salts,Acetic acid,64-19-7,Calcium acetate,62-54-4,MATCH,inorganic_counterion_salt,medium,ALL_STEREOISOMERS
+FINALV5_069,Acetic acid and its salts,Acetic acid,64-19-7,Methyl acetate,79-20-9,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_070,Acetic acid and its salts,Acetic acid,64-19-7,Ethyl acetate,141-78-6,NO_MATCH,covalent_ester,medium,ALL_STEREOISOMERS
+FINALV5_071,Acetic acid and its salts,Acetic acid,64-19-7,Acetamide,60-35-5,NO_MATCH,covalent_amide,medium,ALL_STEREOISOMERS
+FINALV5_072,Acetic acid and its salts,Acetic acid,64-19-7,Propionic acid,79-09-4,NO_MATCH,close_structural_analog,hard,ALL_STEREOISOMERS
