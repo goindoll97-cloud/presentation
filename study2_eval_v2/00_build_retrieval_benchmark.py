@@ -6,10 +6,16 @@ This script does NOT alter that benchmark. It derives a second, retrieval-style
 evaluation set in which the query contains CAS identifier(s) only and the GOLD
 answer is the regulatory target that the candidate belongs to, or NOT_FOUND.
 
-For named mixtures without a mixture CAS, a set of component CAS numbers is
-accepted as a CAS-only query. Cases for which neither a mixture CAS nor an
-all-CAS component set exists are excluded from the primary CAS-only retrieval
-benchmark and documented separately.
+Important methodological safeguards
+-----------------------------------
+* Regulatory catalog identity fields are built from target/reference fields,
+  never from MATCH candidate fields.
+* Named-mixture CAS numbers are NOT inferred from GOLD MATCH rows. The primary
+  catalog uses the target's official scope text and target component CAS set.
+* A derived NOT_FOUND label is stronger than the original pairwise NO_MATCH and
+  therefore requires a separate retrieval-scope researcher review before freeze.
+* Target-level scope fields must be unique within each target; row-order fallback
+  is prohibited.
 """
 from __future__ import annotations
 
@@ -78,6 +84,21 @@ def load_py(path: Path, name: str):
     return mod
 
 
+def unique_value(g: pd.DataFrame, column: str, label: str, allow_blank: bool = False) -> str:
+    if column not in g.columns:
+        if allow_blank:
+            return ""
+        raise ValueError(f"Missing target field {column}: {label}")
+    vals = sorted({clean(v) for v in g[column].tolist() if clean(v)})
+    if not vals and allow_blank:
+        return ""
+    if len(vals) != 1:
+        raise ValueError(
+            f"Target field must be unique within {label}: {column} -> {vals}"
+        )
+    return vals[0]
+
+
 def verify_validation_freeze() -> dict:
     for p in [VAL_FREEZE, MASTER_INPUT, MASTER_GOLD, GROUP_REFERENCE]:
         if not p.exists():
@@ -139,59 +160,56 @@ def query_cas_signature(r: pd.Series) -> tuple[str, str]:
 def build_catalog(merged: pd.DataFrame) -> pd.DataFrame:
     group_ref = load_py(GROUP_REFERENCE, "validation_v2_group_reference")
     official = getattr(group_ref, "OFFICIAL_CAS_BY_RULE", {})
-
     rows = []
 
     ps = merged[merged["category"].eq("PARENT_SALT")].copy()
     for parent_cas, g in ps.groupby("reference_parent_cas", sort=True):
-        r = g.iloc[0]
+        parent_cas = norm_cas(parent_cas)
+        scope = unique_value(g, "regulatory_scope_text", f"PARENT_SALT:{parent_cas}")
+        iso = unique_value(g, "isomer_scope", f"PARENT_SALT:{parent_cas}")
         rows.append({
-            "target_id": f"PS::{norm_cas(parent_cas)}",
+            "target_id": f"PS::{parent_cas}",
             "target_type": "PARENT_SALT",
-            "regulatory_scope_text": clean(r.get("regulatory_scope_text")),
-            "reference_cas_set": norm_cas(parent_cas),
+            "regulatory_scope_text": scope,
+            "reference_cas_set": parent_cas,
             "official_member_cas_set": "",
             "mixture_component_cas_set": "",
-            "official_mixture_cas": "",
+            "isomer_scope": iso,
+            "catalog_identity_basis": "FROZEN_TARGET_REFERENCE_FIELDS",
         })
 
     cg = merged[merged["category"].eq("CHEMICAL_GROUP")].copy()
     for rule_id, g in cg.groupby("target_rule_id", sort=True):
-        r = g.iloc[0]
+        scope = unique_value(g, "regulatory_scope_text", f"CHEMICAL_GROUP:{rule_id}")
         members = sorted(norm_cas(v) for v in official.get(rule_id, []) if norm_cas(v))
         rows.append({
             "target_id": f"CG::{clean(rule_id)}",
             "target_type": "CHEMICAL_GROUP",
-            "regulatory_scope_text": clean(r.get("regulatory_scope_text")),
+            "regulatory_scope_text": scope,
             "reference_cas_set": "",
             "official_member_cas_set": "|".join(members),
             "mixture_component_cas_set": "",
-            "official_mixture_cas": "",
+            "isomer_scope": "",
+            "catalog_identity_basis": "FROZEN_REGULATORY_GROUP_REFERENCE",
         })
 
     mx = merged[merged["category"].eq("MIXTURE")].copy()
     for scope_id, g in mx.groupby("target_scope_id", sort=True):
-        r = g.iloc[0]
-        target_components = ""
-        vals = [clean(v) for v in g.get("target_components", pd.Series(dtype=str)).tolist() if clean(v)]
-        if vals:
-            target_components = vals[0]
-        tc = [norm_cas(v) for v in split_parts(target_components)]
-        tc_cas = sorted(set(v for v in tc if valid_cas_format(v)))
-        exact_cas = ""
-        match_rows = g[g["gold_label"].eq("MATCH")]
-        if len(match_rows):
-            c = norm_cas(match_rows.iloc[0].get("candidate_cas"))
-            if valid_cas_format(c):
-                exact_cas = c
+        scope = unique_value(g, "regulatory_scope_text", f"MIXTURE:{scope_id}")
+        target_components = unique_value(
+            g, "target_components", f"MIXTURE:{scope_id}", allow_blank=True
+        )
+        parts = [norm_cas(v) for v in split_parts(target_components)]
+        component_cas = sorted(set(v for v in parts if valid_cas_format(v)))
         rows.append({
             "target_id": f"MX::{clean(scope_id)}",
             "target_type": "MIXTURE",
-            "regulatory_scope_text": clean(r.get("regulatory_scope_text")),
+            "regulatory_scope_text": scope,
             "reference_cas_set": "",
             "official_member_cas_set": "",
-            "mixture_component_cas_set": "|".join(tc_cas),
-            "official_mixture_cas": exact_cas,
+            "mixture_component_cas_set": "|".join(component_cas),
+            "isomer_scope": "",
+            "catalog_identity_basis": "FROZEN_TARGET_SCOPE_AND_COMPONENT_FIELDS",
         })
 
     out = pd.DataFrame(rows).sort_values("target_id").reset_index(drop=True)
@@ -237,9 +255,7 @@ def main() -> None:
     excluded[excluded_cols].to_csv(EXCLUDED, index=False, encoding="utf-8-sig")
 
     usable = merged[merged["cas_inputs"].ne("")].copy()
-    rows_input = []
-    rows_gold = []
-
+    rows_input, rows_gold = [], []
     grouped = list(usable.groupby("cas_inputs", sort=True))
     for i, (signature, g) in enumerate(grouped, start=1):
         qid = f"RQ-{i:04d}"
@@ -247,18 +263,20 @@ def main() -> None:
         if len(match_targets) > 1:
             gold_target = "|".join(match_targets)
             gold_status = "MULTI_TARGET"
+            derivation = "MULTIPLE_FROZEN_PAIRWISE_MATCH_TARGETS"
+            review_required = "YES"
         elif len(match_targets) == 1:
             gold_target = match_targets[0]
             gold_status = "FOUND"
+            derivation = "FROZEN_PAIRWISE_MATCH_TARGET"
+            review_required = "NO_REUSED_VERIFIED_MATCH"
         else:
             gold_target = "NOT_FOUND"
             gold_status = "NOT_FOUND"
+            derivation = "DERIVED_FROM_ABSENCE_OF_MATCH_IN_29_TARGET_CATALOG"
+            review_required = "YES"
 
-        rows_input.append({
-            "query_id": qid,
-            "cas_inputs": signature,
-        })
-
+        rows_input.append({"query_id": qid, "cas_inputs": signature})
         source_categories = sorted(set(clean(v) for v in g["category"] if clean(v)))
         rows_gold.append({
             "query_id": qid,
@@ -268,6 +286,8 @@ def main() -> None:
             "source_case_ids": "|".join(sorted(set(clean(v) for v in g["case_id"]))),
             "query_mode": clean(g.iloc[0]["query_mode"]),
             "n_source_pairwise_rows": int(len(g)),
+            "gold_derivation": derivation,
+            "retrieval_scope_review_required": review_required,
         })
 
     qin = pd.DataFrame(rows_input)
@@ -288,40 +308,38 @@ def main() -> None:
     qin.to_csv(QUERY_INPUT, index=False, encoding="utf-8-sig")
     qgold.to_csv(QUERY_GOLD, index=False, encoding="utf-8-sig")
 
-    source_pairwise_by_cat = merged["category"].value_counts().to_dict()
-    usable_pairwise_by_cat = usable["category"].value_counts().to_dict()
-    excluded_pairwise_by_cat = excluded["category"].value_counts().to_dict()
     query_gold_counts = qgold["gold_status"].value_counts().to_dict()
-    query_mode_counts = qgold["query_mode"].value_counts().to_dict()
-
     manifest = {
-        "protocol": "VALIDATION_V2_DERIVED_CAS_ONLY_RETRIEVAL",
+        "protocol": "VALIDATION_V2_DERIVED_CAS_ONLY_RETRIEVAL_V2",
         "source_validation_frozen_n": int(len(merged)),
         "regulatory_catalog_targets": int(len(catalog)),
         "retrieval_query_n": int(len(qin)),
         "query_gold_status_counts": {k: int(v) for k, v in query_gold_counts.items()},
-        "query_mode_counts": {k: int(v) for k, v in query_mode_counts.items()},
-        "source_pairwise_counts": {k: int(v) for k, v in source_pairwise_by_cat.items()},
-        "usable_pairwise_counts": {k: int(v) for k, v in usable_pairwise_by_cat.items()},
-        "excluded_no_cas_pairwise_counts": {k: int(v) for k, v in excluded_pairwise_by_cat.items()},
+        "retrieval_scope_review_required_n": int(
+            qgold["retrieval_scope_review_required"].eq("YES").sum()
+        ),
         "excluded_no_cas_pairwise_rows": int(len(excluded)),
         "excluded_no_cas_unique_targets": int(excluded["target_id"].nunique()) if len(excluded) else 0,
         "input_policy": (
             "Candidate-side input is CAS identifier(s) only. Single substances use one CAS. "
-            "Named mixtures without a mixture CAS may use an all-CAS component set. "
-            "No candidate names, target scopes, categories, GOLD labels, or regulatory IDs "
-            "are present in retrieval_INPUT.csv."
+            "Named mixtures without a mixture CAS may use an all-CAS component set. No candidate "
+            "names, row-specific target scopes, categories, GOLD labels, or regulatory IDs are "
+            "present in retrieval_INPUT.csv."
+        ),
+        "catalog_policy": (
+            "Catalog identity fields are derived only from frozen target/reference fields and the "
+            "frozen regulatory-group reference. No mixture CAS is back-filled from a GOLD MATCH "
+            "candidate. Named mixtures are represented by scope text and target component CAS set."
+        ),
+        "gold_review_policy": (
+            "FOUND targets reuse frozen verified pairwise MATCH provenance. Derived NOT_FOUND and "
+            "any MULTI_TARGET result require separate researcher review against the complete 29-target "
+            "catalog before retrieval freeze."
         ),
         "external_data_policy": (
-            "At runtime, PubChem may be queried only to obtain SMILES for CAS identifiers. "
-            "PubChem titles, synonyms, names, classifications, and regulatory annotations "
-            "must not be supplied to either evaluated system."
-        ),
-        "derivation_note": (
-            "The original frozen 132 rows are pairwise target-candidate judgments. "
-            "Retrieval queries are deduplicated by CAS signature; cross-target hard negatives "
-            "therefore collapse to the same real candidate query and are assigned to their "
-            "actual MATCH target when one exists."
+            "At runtime, PubChem may be queried only to obtain SMILES for CAS identifiers. PubChem "
+            "titles, synonyms, names, classifications, and regulatory annotations must not be supplied "
+            "to either evaluated system."
         ),
         "validation_freeze_verification": freeze_meta,
         "sha256": {
@@ -336,11 +354,8 @@ def main() -> None:
     MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
-    print(f"[OUT] {CATALOG}")
-    print(f"[OUT] {QUERY_INPUT}")
-    print(f"[OUT] {QUERY_GOLD}")
-    print(f"[OUT] {EXCLUDED}")
-    print(f"[OUT] {MANIFEST}")
+    for p in [CATALOG, QUERY_INPUT, QUERY_GOLD, EXCLUDED, MANIFEST]:
+        print(f"[OUT] {p}")
 
 
 if __name__ == "__main__":
