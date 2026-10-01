@@ -132,9 +132,13 @@ def main() -> None:
             rt.SYSTEM_PROMPT.encode("utf-8")
         ).hexdigest(),
         "n_repeats": int(rt.N_REPEATS),
-        "temperature": float(rt.TEMPERATURE),
+        "sampling_control": rt.SAMPLING_MODE,
         "max_tokens": int(rt.MAX_TOKENS),
         "effort": rt.EFFORT,
+        "transport_amendment": (
+            "Deprecated temperature parameter removed before any successful LLM evaluation call. "
+            "Model, prompt, retrieval data, catalog, gate logic, repeat count, max_tokens, and effort are unchanged."
+        ),
         "n_queries": int(len(qin)),
         "n_catalog_targets": int(len(catalog)),
         "hybrid_gate_counts": {str(k): int(v) for k, v in gate_counts.items()},
