@@ -1,0 +1,4 @@
+dataset,n_rows,scope,source_version,source_url
+regulatory_group_rules_v1.csv,101,101 explicit CAS entries across five generic restricted-substance scopes,"기후에너지환경부고시 제2025-28호, 시행 2026-01-01",https://www.law.go.kr/LSW/flDownload.do?bylClsCd=200201&flSeq=158305589
+group_membership_v1_50.csv,50,25 MATCH + 25 cross-group NO_MATCH,"기후에너지환경부고시 제2025-28호, 시행 2026-01-01",https://www.law.go.kr/LSW/flDownload.do?bylClsCd=200201&flSeq=158305589
+mixture_threshold_v1_50.csv,50,25 MATCH + 25 NO_MATCH; includes >= versus > boundary cases,"기후에너지환경부고시 제2025-28호, 시행 2026-01-01",https://www.law.go.kr/LSW/flDownload.do?bylClsCd=200201&flSeq=158305589
