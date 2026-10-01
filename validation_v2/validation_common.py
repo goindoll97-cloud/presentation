@@ -29,6 +29,9 @@ for p in (DATA, SEEDS, SOURCES, CACHE):
 
 DECISIONS = {"MATCH", "NO_MATCH", "REVIEW"}
 PUBCHEM_ROOT = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+PUBCHEM_RETRIES = 4
+PUBCHEM_MIN_INTERVAL_SEC = 0.25
+_LAST_PUBCHEM_REQUEST_AT = 0.0
 
 
 def clean(x) -> str:
@@ -65,16 +68,95 @@ def valid_cas(cas: str) -> bool:
     return sum((i + 1) * int(d) for i, d in enumerate(reversed(digits))) % 10 == int(chk)
 
 
-def pubchem_by_exact_cas(cas: str, timeout: int = 30) -> dict:
-    """Resolve CAS through PubChem with exact-synonym verification.
+def _pubchem_get_json(url: str, timeout: int = 30, allow_404: bool = False):
+    """Rate-limited PubChem GET with retry for transient failures."""
+    global _LAST_PUBCHEM_REQUEST_AT
+    last_exc = None
+    for attempt in range(PUBCHEM_RETRIES):
+        try:
+            wait = PUBCHEM_MIN_INTERVAL_SEC - (time.monotonic() - _LAST_PUBCHEM_REQUEST_AT)
+            if wait > 0:
+                time.sleep(wait)
+            _LAST_PUBCHEM_REQUEST_AT = time.monotonic()
+            r = requests.get(
+                url,
+                timeout=timeout,
+                headers={"User-Agent": "validation-v2/1.1", "Accept": "application/json"},
+            )
+            if r.status_code == 404 and allow_404:
+                return None
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                if attempt + 1 < PUBCHEM_RETRIES:
+                    retry_after = r.headers.get("Retry-After", "")
+                    try:
+                        delay = float(retry_after) if retry_after else min(8.0, 2 ** attempt)
+                    except Exception:
+                        delay = min(8.0, 2 ** attempt)
+                    time.sleep(max(0.5, delay))
+                    continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 < PUBCHEM_RETRIES:
+                time.sleep(min(8.0, 2 ** attempt))
+                continue
+    if last_exc:
+        raise last_exc
+    return None
 
+
+def _verify_props_for_cas(props: list[dict], cas: str, timeout: int = 30) -> list[dict]:
+    verified = []
+    for prop in props:
+        cid = clean(prop.get("CID"))
+        if not cid:
+            continue
+        syn_url = f"{PUBCHEM_ROOT}/compound/cid/{quote(cid, safe='')}/synonyms/JSON"
+        syn_payload = _pubchem_get_json(syn_url, timeout=timeout, allow_404=True)
+        if not syn_payload:
+            continue
+        info = syn_payload.get("InformationList", {}).get("Information", []) or []
+        synonyms = info[0].get("Synonym", []) if info else []
+        normalized = {re.sub(r"\s+", "", str(x)) for x in synonyms}
+        if cas in normalized:
+            verified.append(prop)
+    return verified
+
+
+def _query_pubchem_properties(term: str, timeout: int = 30):
+    term = clean(term)
+    if not term:
+        return []
+    q = quote(term, safe="")
+    url = f"{PUBCHEM_ROOT}/compound/name/{q}/property/Title,CanonicalSMILES,IsomericSMILES,InChIKey/JSON"
+    payload = _pubchem_get_json(url, timeout=timeout, allow_404=True)
+    if not payload:
+        return []
+    return payload.get("PropertyTable", {}).get("Properties", []) or []
+
+
+def pubchem_by_exact_cas(cas: str, candidate_name: str = "", timeout: int = 30) -> dict:
+    """Resolve a candidate in PubChem and verify its exact CAS synonym.
+
+    Lookup strategy
+    ---------------
+    1. Query PubChem directly by CAS.
+    2. If the direct CAS query returns no compound, query by candidate name.
+    3. In either path, accept a record only if the requested CAS is present in
+       the returned CID's PubChem synonym list.
+
+    This prevents a PubChem CAS-search miss from incorrectly rejecting a valid
+    externally curated candidate while retaining strict exact-CAS verification.
     Identity metadata only: this function never infers a regulatory GOLD label.
     """
     cas = re.sub(r"\s+", "", clean(cas))
+    candidate_name = clean(candidate_name)
     out = {
         "candidate_cas": cas,
         "external_db": "PubChem",
         "external_db_status": "",
+        "pubchem_lookup_route": "",
         "pubchem_cid": "",
         "pubchem_title": "",
         "pubchem_isomeric_smiles": "",
@@ -86,38 +168,39 @@ def pubchem_by_exact_cas(cas: str, timeout: int = 30) -> dict:
     if not valid_cas(cas):
         out["external_db_status"] = "NO_VALID_CAS"
         return out
-    q = quote(cas, safe="")
-    url = f"{PUBCHEM_ROOT}/compound/name/{q}/property/Title,CanonicalSMILES,IsomericSMILES,InChIKey/JSON"
+
     try:
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "validation-v2/1.0"})
-        if r.status_code == 404:
-            out["external_db_status"] = "NOT_FOUND"
+        # Route 1: direct CAS lookup.
+        direct_props = _query_pubchem_properties(cas, timeout=timeout)
+        verified = _verify_props_for_cas(direct_props, cas, timeout=timeout)
+        route = "CAS_DIRECT"
+
+        # Route 2: PubChem occasionally resolves the compound page and synonym
+        # correctly but the PUG name endpoint does not return the CAS query.
+        # In that case, query the curated candidate name and still require the
+        # exact CAS in the resulting CID synonym list.
+        if len(verified) == 0 and candidate_name:
+            name_props = _query_pubchem_properties(candidate_name, timeout=timeout)
+            verified = _verify_props_for_cas(name_props, cas, timeout=timeout)
+            route = "NAME_FALLBACK_EXACT_CAS"
+
+        if len(verified) == 0:
+            out["external_db_status"] = "NOT_FOUND_OR_CAS_UNVERIFIED"
+            out["pubchem_lookup_route"] = route
             return out
-        r.raise_for_status()
-        props = r.json().get("PropertyTable", {}).get("Properties", []) or []
-        verified = []
-        for prop in props:
-            cid = clean(prop.get("CID"))
-            if not cid:
-                continue
-            time.sleep(0.12)
-            sr = requests.get(
-                f"{PUBCHEM_ROOT}/compound/cid/{quote(cid, safe='')}/synonyms/JSON",
-                timeout=timeout,
-                headers={"User-Agent": "validation-v2/1.0"},
-            )
-            sr.raise_for_status()
-            info = sr.json().get("InformationList", {}).get("Information", []) or []
-            synonyms = info[0].get("Synonym", []) if info else []
-            if cas in {re.sub(r"\s+", "", str(x)) for x in synonyms}:
-                verified.append(prop)
-        if len(verified) != 1:
-            out["external_db_status"] = "MULTIPLE_OR_UNVERIFIED"
+        if len(verified) > 1:
+            # Multiple PubChem records can legitimately represent the same
+            # formula/identity with the same CAS. Do not pick one silently.
+            out["external_db_status"] = "MULTIPLE_EXACT_CAS_RECORDS_REVIEW"
+            out["pubchem_lookup_route"] = route
+            out["pubchem_cid"] = ";".join(clean(x.get("CID")) for x in verified)
             return out
+
         p = verified[0]
         cid = clean(p.get("CID"))
         out.update({
             "external_db_status": "EXACT_CAS_VERIFIED",
+            "pubchem_lookup_route": route,
             "pubchem_cid": cid,
             "pubchem_title": clean(p.get("Title")),
             "pubchem_isomeric_smiles": clean(p.get("IsomericSMILES")) or clean(p.get("SMILES")),
