@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Freeze Validation V2 after all three category datasets are curated.
+"""Freeze Validation V2 after all three category datasets are curated and audited.
 
 Paper-facing freeze requirements intentionally check both row counts and dataset
 DIVERSITY. In particular, mixture cross-pairing must not inflate the apparent
 sample size: at least 15 unique target mixture identities are required.
+
+The pre-freeze audit (04b_audit_validation_v2.py) is mandatory. Freeze is blocked
+unless VALIDATION_V2_AUDIT.json reports overall_status=PASS.
 """
 from __future__ import annotations
 
@@ -13,12 +16,14 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from validation_common import DATA, ROOT, SEEDS, sha256
+from validation_common import DATA, ROOT, SEEDS, SOURCES, sha256
 
 ALLOW_SMALL = os.getenv("VALIDATION_V2_ALLOW_SMALL_FREEZE", "0").strip().lower() in {"1", "true", "yes", "on"}
 MIN_COUNTS = {"PARENT_SALT": 72, "CHEMICAL_GROUP": 20, "MIXTURE": 20}
 MIN_UNIQUE_MIXTURE_TARGETS = 15
 MIN_CHEMICAL_GROUP_RULES = 3
+AUDIT_JSON = ROOT / "VALIDATION_V2_AUDIT.json"
+MANUAL_REVIEW = SOURCES / "validation_manual_source_review.csv"
 
 FILES = [
     ROOT / "validation_common.py",
@@ -27,6 +32,7 @@ FILES = [
     ROOT / "02_build_chemical_group_validation.py",
     ROOT / "03_build_mixture_validation.py",
     ROOT / "04_merge_validation_master.py",
+    ROOT / "04b_audit_validation_v2.py",
     SEEDS / "chemical_group_candidates_seed.csv",
     SEEDS / "mixture_candidates_seed.csv",
     SEEDS / "mixture_candidates_seed_additional.csv",
@@ -38,6 +44,8 @@ FILES = [
     DATA / "validation_mixture_GOLD.csv",
     DATA / "validation_master_INPUT.csv",
     DATA / "validation_master_GOLD.csv",
+    AUDIT_JSON,
+    MANUAL_REVIEW,
 ]
 
 
@@ -45,6 +53,22 @@ def main() -> None:
     missing = [str(p) for p in FILES if not p.exists()]
     if missing:
         raise FileNotFoundError("Missing files before freeze:\n" + "\n".join(missing))
+
+    audit = json.loads(AUDIT_JSON.read_text(encoding="utf-8"))
+    if audit.get("overall_status") != "PASS":
+        raise RuntimeError(
+            "Validation V2 pre-freeze audit has not passed. "
+            "Run 04b_audit_validation_v2.py, complete the manual source-review checklist, "
+            "and rerun the audit before freezing."
+        )
+
+    review = pd.read_csv(MANUAL_REVIEW, dtype=str).fillna("")
+    statuses = review["manual_review_status"].astype(str).str.upper()
+    if not statuses.eq("APPROVED").all():
+        raise RuntimeError(
+            "Manual source review is incomplete. All rows in "
+            "sources/validation_manual_source_review.csv must be APPROVED before freeze."
+        )
 
     inp = pd.read_csv(DATA / "validation_master_INPUT.csv", dtype=str).fillna("")
     gold = pd.read_csv(DATA / "validation_master_GOLD.csv", dtype=str).fillna("")
@@ -80,6 +104,9 @@ def main() -> None:
         "protocol": "VALIDATION_V2_THREE_CATEGORY",
         "frozen_at_utc": datetime.now(timezone.utc).isoformat(),
         "allow_small_freeze": ALLOW_SMALL,
+        "pre_freeze_audit_status": audit.get("overall_status"),
+        "manual_source_review_items": int(len(review)),
+        "manual_source_review_approved": int(statuses.eq("APPROVED").sum()),
         "n_total": int(len(gold)),
         "category_counts": {k: int(v) for k, v in counts.items()},
         "label_counts": {k: int(v) for k, v in labels.items()},
@@ -95,6 +122,7 @@ def main() -> None:
             "CHEMICAL_GROUP": "External-DB open-set candidates; exact target-rule CAS hits excluded from MATCH seed cases.",
             "MIXTURE": "Real named chemical-mixture records with exact-composition matches and cross-mixture hard negatives.",
             "mixture_effective_n": "Report unique mixture identities separately from pairwise case rows.",
+            "manual_source_review": "All external chemical-group cases and unique mixture identities were manually reviewed before freeze.",
             "leakage_control": "INPUT and GOLD files are physically separated before evaluation.",
         },
         "sha256": {str(p.relative_to(ROOT)).replace("\\", "/"): sha256(p) for p in FILES},
