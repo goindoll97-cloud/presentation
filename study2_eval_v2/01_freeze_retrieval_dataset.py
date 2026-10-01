@@ -2,9 +2,10 @@
 """Audit and freeze the derived CAS-only retrieval dataset.
 
 The original Validation V2 freeze remains untouched. This step rebuilds the
-retrieval derivative, applies documented CAS corrections, refreshes the human
-review table, and refuses to freeze until every retrieval-scope review-required
-GOLD row has explicit researcher approval.
+retrieval derivative, applies independently verified official mixture-CAS
+references, applies documented CAS corrections, refreshes the human review
+table, and refuses to freeze until every retrieval-scope review-required GOLD
+row has explicit researcher approval.
 """
 from __future__ import annotations
 
@@ -22,6 +23,9 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 DATA = ROOT / "data"
 BUILDER = ROOT / "00_build_retrieval_benchmark.py"
+MIXTURE_REF_APPLIER = ROOT / "00c_apply_mixture_regulatory_reference.py"
+MIXTURE_REFERENCE = ROOT / "reference" / "mixture_regulatory_reference.csv"
+MIXTURE_REFERENCE_AUDIT = DATA / "mixture_regulatory_reference_applied.csv"
 CORRECTOR = ROOT / "00a_apply_cas_corrections.py"
 GOLD_OVERRIDER = ROOT / "00b_apply_gold_overrides.py"
 REVIEW_PREP = ROOT / "01a_prepare_retrieval_gold_review.py"
@@ -55,16 +59,25 @@ def valid_cas_checksum(cas: str) -> bool:
 
 
 def main() -> None:
-    for script in [BUILDER, CORRECTOR, GOLD_OVERRIDER, REVIEW_PREP, REVIEW_SIGNOFF]:
+    for script in [
+        BUILDER, MIXTURE_REF_APPLIER, CORRECTOR,
+        GOLD_OVERRIDER, REVIEW_PREP, REVIEW_SIGNOFF,
+    ]:
         if not script.exists():
             raise FileNotFoundError(script)
+    if not MIXTURE_REFERENCE.exists():
+        raise FileNotFoundError(MIXTURE_REFERENCE)
 
     subprocess.run([sys.executable, str(BUILDER)], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(MIXTURE_REF_APPLIER)], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(CORRECTOR)], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(GOLD_OVERRIDER)], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(REVIEW_PREP)], cwd=ROOT, check=True)
 
-    for p in [CATALOG, QINPUT, QGOLD, EXCLUDED, CORRECTIONS, MANIFEST, REVIEW, GOLD_OVERRIDES, VAL_FREEZE]:
+    for p in [
+        CATALOG, QINPUT, QGOLD, EXCLUDED, CORRECTIONS, MANIFEST, REVIEW,
+        GOLD_OVERRIDES, MIXTURE_REFERENCE, MIXTURE_REFERENCE_AUDIT, VAL_FREEZE,
+    ]:
         if not p.exists():
             raise FileNotFoundError(p)
 
@@ -73,6 +86,8 @@ def main() -> None:
     catalog = pd.read_csv(CATALOG, dtype=str).fillna("")
     excluded = pd.read_csv(EXCLUDED, dtype=str).fillna("")
     review = pd.read_csv(REVIEW, dtype=str).fillna("")
+    mix_ref = pd.read_csv(MIXTURE_REFERENCE, dtype=str).fillna("")
+    mix_audit = pd.read_csv(MIXTURE_REFERENCE_AUDIT, dtype=str).fillna("")
     build = json.loads(MANIFEST.read_text(encoding="utf-8"))
     validation_freeze = json.loads(VAL_FREEZE.read_text(encoding="utf-8"))
 
@@ -95,9 +110,36 @@ def main() -> None:
         set(catalog["target_type"]) == {"PARENT_SALT", "CHEMICAL_GROUP", "MIXTURE"},
         sorted(set(catalog["target_type"])))
     add("catalog_29_targets", len(catalog) == 29, len(catalog))
-    add("mixture_gold_cas_not_backfilled",
-        "official_mixture_cas" not in catalog.columns,
-        "official_mixture_cas absent" if "official_mixture_cas" not in catalog.columns else "column present")
+
+    # Mixture CAS values may enter the catalog only through the independent
+    # official regulatory reference file; never by back-filling a GOLD MATCH row.
+    ref_pairs = {
+        (str(r.target_id).strip(), str(r.official_mixture_cas).strip())
+        for r in mix_ref.itertuples(index=False)
+        if str(r.target_id).strip() and str(r.official_mixture_cas).strip()
+    }
+    catalog_pairs = {
+        (str(r.target_id).strip(), str(getattr(r, "official_mixture_cas", "")).strip())
+        for r in catalog.itertuples(index=False)
+        if str(getattr(r, "official_mixture_cas", "")).strip()
+    }
+    add(
+        "mixture_official_cas_from_independent_reference",
+        bool(ref_pairs) and catalog_pairs == ref_pairs,
+        f"reference={sorted(ref_pairs)}, catalog={sorted(catalog_pairs)}",
+    )
+    basis_ok = True
+    if catalog_pairs:
+        for tid, _cas in catalog_pairs:
+            row = catalog[catalog["target_id"].eq(tid)]
+            if len(row) != 1 or row.iloc[0].get("official_mixture_cas_basis", "") != "INDEPENDENT_OFFICIAL_REGULATORY_REFERENCE":
+                basis_ok = False
+                break
+    add(
+        "mixture_official_cas_basis_independent",
+        basis_ok and len(mix_audit) == len(ref_pairs),
+        mix_audit[["target_id", "official_mixture_cas", "source_name"]].to_dict("records") if len(mix_audit) else [],
+    )
 
     bad_cas, multi = [], 0
     for r in qin.itertuples(index=False):
@@ -139,8 +181,6 @@ def main() -> None:
         bool(len(required) > 0 and approved.all() and not rejected.any() and not pending.any()),
         f"approved={int(approved.sum())}, pending={int(pending.sum())}, rejected={int(rejected.sum())}")
 
-    # A NOT_FOUND (or other) GOLD whose CAS is listed under a different catalog target
-    # must not be approved silently: it needs a GOLD override or an explicit per-row note.
     conflict = required.apply(
         lambda r: bool(r["catalog_exact_hit_precheck"])
         and r["derived_gold_target_id"] not in r["catalog_exact_hit_precheck"].split("|"),
@@ -171,7 +211,7 @@ def main() -> None:
         raise RuntimeError(f"Retrieval dataset audit failed: {n_fail} FAIL item(s)")
 
     freeze = {
-        "protocol": "STUDY2_RETRIEVAL_DATASET_V2",
+        "protocol": "STUDY2_RETRIEVAL_DATASET_V2_1",
         "frozen_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_validation_protocol": validation_freeze.get("protocol"),
         "source_validation_frozen_at_utc": validation_freeze.get("frozen_at_utc"),
@@ -192,8 +232,10 @@ def main() -> None:
             "names, row-specific target scope, category, or GOLD information is supplied."
         ),
         "catalog_policy": (
-            "Mixture catalog entries are built from frozen target scope/component fields. No mixture "
-            "CAS is inferred from a GOLD MATCH candidate."
+            "Catalog target identity is built independently of retrieval GOLD. Named-mixture component "
+            "CAS sets come from frozen target scope fields; an official mixture CAS is included only "
+            "when independently verified in reference/mixture_regulatory_reference.csv from an official "
+            "regulatory source. No mixture CAS is inferred from a GOLD MATCH candidate."
         ),
         "gold_review_policy": (
             "Every derived NOT_FOUND or MULTI_TARGET retrieval claim requires explicit researcher "
@@ -206,6 +248,9 @@ def main() -> None:
         "checks": checks,
         "sha256": {
             "00_build_retrieval_benchmark.py": sha256(BUILDER),
+            "00c_apply_mixture_regulatory_reference.py": sha256(MIXTURE_REF_APPLIER),
+            "reference/mixture_regulatory_reference.csv": sha256(MIXTURE_REFERENCE),
+            "data/mixture_regulatory_reference_applied.csv": sha256(MIXTURE_REFERENCE_AUDIT),
             "00a_apply_cas_corrections.py": sha256(CORRECTOR),
             "00b_apply_gold_overrides.py": sha256(GOLD_OVERRIDER),
             "review/retrieval_gold_overrides.csv": sha256(GOLD_OVERRIDES),
