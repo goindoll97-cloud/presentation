@@ -29,6 +29,7 @@ FILES = [
     ROOT / "04_merge_validation_master.py",
     SEEDS / "chemical_group_candidates_seed.csv",
     SEEDS / "mixture_candidates_seed.csv",
+    SEEDS / "mixture_candidates_seed_additional.csv",
     DATA / "validation_parent_salt_INPUT.csv",
     DATA / "validation_parent_salt_GOLD.csv",
     DATA / "validation_chemical_group_INPUT.csv",
@@ -92,7 +93,7 @@ def main() -> None:
         "design_notes": {
             "PARENT_SALT": "Controlled carry-over from V6; not an independent holdout.",
             "CHEMICAL_GROUP": "External-DB open-set candidates; exact target-rule CAS hits excluded from MATCH seed cases.",
-            "MIXTURE": "Real named K-REACH mixture records with exact-composition matches and cross-mixture hard negatives.",
+            "MIXTURE": "Real named chemical-mixture records with exact-composition matches and cross-mixture hard negatives.",
             "mixture_effective_n": "Report unique mixture identities separately from pairwise case rows.",
             "leakage_control": "INPUT and GOLD files are physically separated before evaluation.",
         },
