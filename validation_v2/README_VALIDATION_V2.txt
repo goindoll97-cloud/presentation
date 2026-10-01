@@ -10,9 +10,9 @@ The benchmark is separated into three chemical-scope categories:
    Parent substances and their salts.
 
 2) CHEMICAL_GROUP
-   Generic chemical-group scopes. This subset is designed to include candidates
-   that are NOT directly enumerated in the closed regulatory CAS list but can be
-   supported by external chemical-identity evidence.
+   Generic chemical-group scopes. This subset includes candidates that are NOT
+   directly enumerated under the target rule's frozen closed-registry CAS list,
+   but whose chemical identity can be supported by an external database.
 
 3) MIXTURE
    Named mixtures/compositions, including CAS-less regulatory mixture identities.
@@ -29,6 +29,7 @@ Directory
 ---------
 validation_v2/
   validation_common.py
+  regulatory_group_reference.py
   01_build_parent_salt_validation.py
   02_build_chemical_group_validation.py
   03_build_mixture_validation.py
@@ -50,29 +51,53 @@ They MUST NOT be described as a new independent holdout.
 
 Chemical-group subset
 ---------------------
-The seed file starts with a small number of externally supported open-set cases,
-including lead compounds not directly enumerated in the closed starter registry,
-a Cr(VI) open-set positive, and oxidation-state / homolog hard negatives.
+Current curated seed: n = 30 (MATCH 15 / NO_MATCH 15).
+
+The current seed deliberately emphasizes open-set chemical-scope challenges:
+- Pb-containing compounds whose candidate CAS is not directly enumerated in the
+  target rule's frozen closed-registry CAS set;
+- tributyltin compounds not directly enumerated in the closed registry;
+- a Cr(VI) open-set positive;
+- oxidation-state, substituent-class, homolog, and metal-analog hard negatives.
 
 02_build_chemical_group_validation.py:
-- resolves supplied CAS through PubChem;
-- verifies exact CAS as a PubChem synonym;
-- checks whether that CAS is directly enumerated in data/regulatory_group_rules_v1.csv;
+- enriches supplied CAS through PubChem when available;
+- records PubChem exact-CAS verification as live QC metadata;
+- does NOT fail dataset construction solely because a PubChem API lookup is
+  unresolved, because live API behavior is not the GOLD-label authority;
+- checks direct membership against validation_v2/regulatory_group_reference.py;
 - does NOT create a GOLD label from PubChem;
 - exports only rows already marked curation_status=APPROVED.
 
-The starter seed count is deliberately small. Expand and curate it before a
-paper-facing freeze.
+Important interpretation:
+This subset tests chemical-scope classification under the benchmark's encoded
+regulatory-scope definition. It should not be described as an independent legal
+opinion for every real-world regulatory application.
 
 Mixture subset
 --------------
-The seed file begins with real mixture identities found in Korea's chemical
-information system, including:
-- Mixture of methylsilanetriol triphosphate and phosphoric acid (CAS not assigned)
-- a four-component acrylate mixture identified by CAS numbers
+Current curated seed: n = 20 (MATCH 10 / NO_MATCH 10), representing 10 unique
+named mixture identities from the K-REACH classification/labeling list.
 
-MATCH and reciprocal composition hard-negative examples are included only as a
-starter for the data model. Expand real mixture cases before final freeze.
+Examples include:
+- Mixture of methylsilanetriol triphosphate and phosphoric acid (CAS-less mixture)
+- a four-component acrylate mixture
+- phosphine-oxide mixtures
+- isomeric ketone / ester / amine mixture identities
+
+For each of the 10 target mixture identities, the seed contains:
+- one exact-composition MATCH;
+- one cross-mixture NO_MATCH using another real K-REACH mixture as a hard negative.
+
+Thus n=20 should not be interpreted as 20 independent mixture identities; the
+current effective unique-mixture count is 10. Future expansion should increase
+unique mixture identities rather than only adding more cross-pair rows.
+
+Source
+------
+Mixture identities are anchored to the K-REACH Chemical Information Processing
+System classification/labeling PDF:
+https://kreach.me.go.kr/repwrt/ghs/ghsClassLabeling/ghsPdf.do
 
 Recommended execution
 ---------------------
@@ -84,20 +109,13 @@ From the repository root:
   python 03_build_mixture_validation.py
   python 04_merge_validation_master.py
 
-Do NOT freeze for the final paper while the starter external subsets are small.
-The freeze script requires by default:
+Default final-freeze minimums:
   PARENT_SALT    >= 72
   CHEMICAL_GROUP >= 20
   MIXTURE        >= 20
 
 Final freeze:
   python 05_freeze_validation_v2.py
-
-Development-only small freeze:
-PowerShell:
-  $env:VALIDATION_V2_ALLOW_SMALL_FREEZE="1"
-  python 05_freeze_validation_v2.py
-  Remove-Item Env:VALIDATION_V2_ALLOW_SMALL_FREEZE -ErrorAction SilentlyContinue
 
 Generated files
 ---------------
