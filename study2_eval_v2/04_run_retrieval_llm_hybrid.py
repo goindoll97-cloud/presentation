@@ -101,7 +101,7 @@ def main() -> None:
         "model": rt.MODEL,
         "prompt_version": rt.PROMPT_VERSION,
         "n_repeats": int(rt.N_REPEATS),
-        "temperature": float(rt.TEMPERATURE),
+        "sampling_control": rt.SAMPLING_MODE,
         "n_queries": int(len(qin)),
         "hybrid_direct_queries": int((gate["gate_status"] == "FOUND").sum()),
         "hybrid_review_queries": int((gate["gate_status"] == "REVIEW").sum()),
