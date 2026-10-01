@@ -7,6 +7,7 @@ CAS has been independently verified from an official regulatory source.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -17,6 +18,7 @@ DATA = ROOT / "data"
 REFERENCE = ROOT / "reference" / "mixture_regulatory_reference.csv"
 CATALOG = DATA / "regulatory_catalog.csv"
 AUDIT = DATA / "mixture_regulatory_reference_applied.csv"
+MANIFEST = DATA / "retrieval_build_manifest.json"
 
 CAS_RE = re.compile(r"^\d{2,7}-\d{2}-\d$")
 
@@ -47,12 +49,13 @@ def sha256(path: Path) -> str:
 
 
 def main() -> None:
-    for p in [REFERENCE, CATALOG]:
+    for p in [REFERENCE, CATALOG, MANIFEST]:
         if not p.exists():
             raise FileNotFoundError(p)
 
     ref = pd.read_csv(REFERENCE, dtype=str).fillna("")
     catalog = pd.read_csv(CATALOG, dtype=str).fillna("")
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
     required = {
         "target_id", "target_scope_id", "official_mixture_cas",
@@ -106,12 +109,28 @@ def main() -> None:
             "reference_sha256": sha256(REFERENCE),
         })
 
+    audit = pd.DataFrame(audit_rows)
     catalog.to_csv(CATALOG, index=False, encoding="utf-8-sig")
-    pd.DataFrame(audit_rows).to_csv(AUDIT, index=False, encoding="utf-8-sig")
+    audit.to_csv(AUDIT, index=False, encoding="utf-8-sig")
+
+    manifest["independent_mixture_regulatory_reference"] = {
+        "policy": (
+            "Official mixture CAS values are added only from an independent official regulatory "
+            "reference and never inferred from retrieval GOLD or a MATCH candidate row."
+        ),
+        "reference_file": "reference/mixture_regulatory_reference.csv",
+        "reference_sha256": sha256(REFERENCE),
+        "n_reference_rows": int(len(ref)),
+        "applied_targets": audit[["target_id", "official_mixture_cas", "source_name"]].to_dict("records"),
+    }
+    manifest.setdefault("sha256", {})["regulatory_catalog.csv"] = sha256(CATALOG)
+    manifest["sha256"]["reference/mixture_regulatory_reference.csv"] = sha256(REFERENCE)
+    manifest["sha256"]["mixture_regulatory_reference_applied.csv"] = sha256(AUDIT)
+    MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"[MIXTURE REFERENCE] applied={len(audit_rows)}")
     if audit_rows:
-        print(pd.DataFrame(audit_rows)[["target_id", "official_mixture_cas", "source_name"]].to_string(index=False))
+        print(audit[["target_id", "official_mixture_cas", "source_name"]].to_string(index=False))
     print(f"[OUT] {AUDIT}")
 
 
