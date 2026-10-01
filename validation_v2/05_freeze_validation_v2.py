@@ -27,6 +27,9 @@ EXPECTED_GROUP_RULES = {
 AUDIT_JSON = ROOT / "VALIDATION_V2_AUDIT.json"
 MANUAL_REVIEW = SOURCES / "validation_manual_source_review.csv"
 SOURCE_EVIDENCE = SEEDS / "source_verification_evidence_v2.csv"
+SOURCE_EVIDENCE_PATCH = SEEDS / "source_verification_evidence_patch_2023.csv"
+MIXTURE_REPLACEMENT = SEEDS / "mixture_candidates_seed_replacement_2023.csv"
+MERGED_EVIDENCE = SOURCES / "source_verification_evidence_merged_for_audit.csv"
 
 FILES = [
     ROOT / "validation_common.py",
@@ -36,11 +39,14 @@ FILES = [
     ROOT / "03_build_mixture_validation.py",
     ROOT / "04_merge_validation_master.py",
     ROOT / "04b_audit_validation_v2.py",
+    ROOT / "04b2_audit_validation_v2.py",
     ROOT / "04c_author_signoff.py",
     SEEDS / "chemical_group_candidates_seed.csv",
     SEEDS / "mixture_candidates_seed.csv",
     SEEDS / "mixture_candidates_seed_additional.csv",
+    MIXTURE_REPLACEMENT,
     SOURCE_EVIDENCE,
+    SOURCE_EVIDENCE_PATCH,
     DATA / "validation_parent_salt_INPUT.csv",
     DATA / "validation_parent_salt_GOLD.csv",
     DATA / "validation_chemical_group_INPUT.csv",
@@ -51,6 +57,7 @@ FILES = [
     DATA / "validation_master_GOLD.csv",
     AUDIT_JSON,
     MANUAL_REVIEW,
+    MERGED_EVIDENCE,
 ]
 
 
@@ -65,7 +72,7 @@ def main() -> None:
     if audit.get("overall_status") != "PASS":
         raise RuntimeError(
             "Validation V2 pre-freeze audit has not passed. Run "
-            "04b_audit_validation_v2.py and resolve all FAIL items."
+            "04b2_audit_validation_v2.py and resolve all FAIL items."
         )
 
     review = pd.read_csv(MANUAL_REVIEW, dtype=str).fillna("")
@@ -97,6 +104,7 @@ def main() -> None:
     }
 
     mix_inp = inp[inp["category"].eq("MIXTURE")].copy()
+    mix_gold = gold[gold["category"].eq("MIXTURE")].copy()
     grp_inp = inp[inp["category"].eq("CHEMICAL_GROUP")].copy()
     grp_gold = gold[gold["category"].eq("CHEMICAL_GROUP")].copy()
 
@@ -137,6 +145,22 @@ def main() -> None:
     else:
         group_balance = {}
 
+    # The paper-facing MIXTURE subset is a named-mixture identity benchmark.
+    # Reaction mixtures/products are intentionally excluded and handled separately.
+    if "mixture_scope_kind" not in mix_gold.columns:
+        diversity_failures["mixture_scope_kind"] = "missing"
+    else:
+        bad_scope_kind = mix_gold.loc[
+            ~mix_gold["mixture_scope_kind"].eq("NAMED_MIXTURE"), "case_id"
+        ].tolist()
+        if bad_scope_kind:
+            diversity_failures["mixture_scope_kind"] = bad_scope_kind
+
+    if "target_scope_id" in mix_inp.columns and "2021-1-1059" in set(mix_inp["target_scope_id"]):
+        diversity_failures["excluded_reaction_target_present"] = "2021-1-1059"
+    if "target_scope_id" in mix_inp.columns and "2023-1-1162" not in set(mix_inp["target_scope_id"]):
+        diversity_failures["replacement_named_mixture_missing"] = "2023-1-1162"
+
     if (too_small or diversity_failures) and not ALLOW_SMALL:
         raise RuntimeError(
             "Validation V2 is not ready for final paper-facing freeze. "
@@ -176,14 +200,20 @@ def main() -> None:
                 "Appendix-3 enumeration and open-set generic-scope cases."
             ),
             "MIXTURE": (
-                "Thirty classification cases based on fifteen unique real "
+                "Thirty classification cases based on fifteen unique real named "
                 "mixture identities; each target has one exact MATCH and one "
-                "cross-mixture hard negative."
+                "cross-mixture hard negative. Reaction mixtures/products are "
+                "excluded from this subset."
+            ),
+            "mixture_correction_2026_10_01": (
+                "Target 2021-1-1059 was removed after official-source re-review "
+                "showed it is a Reaction mixture. It was replaced by official "
+                "named mixture 2023-1-1162."
             ),
             "source_verification": (
-                "AI-assisted source verification is explicitly recorded in "
-                "source_verification_evidence_v2.csv and is not represented "
-                "as human review."
+                "AI-assisted source verification is explicitly recorded in the "
+                "base evidence file plus additive evidence patch and is not "
+                "represented as human review."
             ),
             "researcher_signoff": (
                 "A separate explicit researcher sign-off is required after "
