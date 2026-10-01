@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Build open-set chemical-group validation data from curated external candidates.
+"""Build balanced chemical-group validation data from curated candidates.
 
 Design principle
 ----------------
-The curated external source is the benchmark evidence. Live PubChem retrieval is
-best-effort enrichment/QC only and must not decide the GOLD label or make dataset
-construction fail because of API/search-index behaviour.
+The curated source evidence establishes the benchmark GOLD label. Live PubChem
+retrieval is best-effort enrichment/QC only and never creates a GOLD label.
+
+The V2 paper-facing subset intentionally mixes:
+- DIRECT_ENUMERATED_MATCH: candidate CAS is explicitly listed in Appendix 3;
+- OPEN_SET_GROUP_MATCH: candidate belongs to the generic group but its CAS is
+  not directly enumerated, exercising the catch-all/generic-scope problem;
+- HARD_NEGATIVE: chemically related or confusable candidate outside the scope.
 """
 from __future__ import annotations
 
@@ -34,6 +39,8 @@ def main() -> None:
     miss = [c for c in needed if c not in seed.columns]
     if miss:
         raise ValueError(f"Missing seed columns: {miss}")
+    if seed["seed_id"].duplicated().any():
+        raise ValueError("Duplicate chemical-group seed_id")
 
     official_pairs = {
         (rule_id, cas)
@@ -55,9 +62,18 @@ def main() -> None:
         }
         row = r.to_dict()
         row.update(pc)
-        row["official_list_hit"] = (
-            "YES" if (str(r["target_rule_id"]), cas) in official_pairs else "NO"
-        )
+        list_hit = "YES" if (str(r["target_rule_id"]), cas) in official_pairs else "NO"
+        row["official_list_hit"] = list_hit
+        label = str(r["gold_label"]).strip().upper()
+        if label == "MATCH" and list_hit == "YES":
+            subtype = "DIRECT_ENUMERATED_MATCH"
+        elif label == "MATCH":
+            subtype = "OPEN_SET_GROUP_MATCH"
+        elif label == "NO_MATCH":
+            subtype = "HARD_NEGATIVE"
+        else:
+            subtype = "REVIEW"
+        row["challenge_subtype"] = subtype
         row["live_pubchem_qc"] = (
             "PASS" if (not cas or pc.get("external_db_status") == "EXACT_CAS_VERIFIED")
             else "UNRESOLVED_NONBLOCKING"
@@ -73,13 +89,15 @@ def main() -> None:
     if approved.empty:
         raise RuntimeError("No APPROVED chemical-group cases. Curate the seed CSV first.")
 
-    # Blocking QC is limited to benchmark-design errors that would invalidate
-    # the curated validation set. Live DB lookup is intentionally non-blocking.
+    # Blocking QC: source must exist and a NO_MATCH must never be an exact
+    # official-list hit for the same target group.
     for _, r in approved.iterrows():
-        if r["gold_label"] == "MATCH" and r["official_list_hit"] != "NO":
-            raise ValueError(f"Open-set MATCH unexpectedly already in official list: {r['seed_id']}")
         if not str(r["external_source_url"]).strip():
             raise ValueError(f"Approved case lacks external source URL: {r['seed_id']}")
+        if r["gold_label"] == "NO_MATCH" and r["official_list_hit"] == "YES":
+            raise ValueError(
+                f"NO_MATCH contradicts exact official-list membership: {r['seed_id']}"
+            )
 
     input_cols = [
         "case_id", "category", "target_rule_id", "regulatory_scope_text",
@@ -87,29 +105,33 @@ def main() -> None:
     ]
     gold_cols = [
         "case_id", "category", "gold_label", "gold_reason", "curation_status",
-        "official_list_hit", "external_source", "external_source_url",
-        "external_db_status", "live_pubchem_qc", "pubchem_lookup_route",
-        "pubchem_cid", "pubchem_title", "pubchem_isomeric_smiles",
-        "pubchem_canonical_smiles", "pubchem_inchikey",
+        "challenge_subtype", "official_list_hit", "external_source",
+        "external_source_url", "external_db_status", "live_pubchem_qc",
+        "pubchem_lookup_route", "pubchem_cid", "pubchem_title",
+        "pubchem_isomeric_smiles", "pubchem_canonical_smiles", "pubchem_inchikey",
         "independent_evidence_note", "seed_id",
     ]
-    ip, gp = split_input_gold(approved, input_cols, gold_cols, "validation_chemical_group")
+    ip, gp = split_input_gold(
+        approved, input_cols, gold_cols, "validation_chemical_group"
+    )
 
     manifest = approved[[
         "case_id", "target_rule_id", "candidate_name", "candidate_cas",
-        "external_source", "external_source_url", "official_list_hit",
-        "live_pubchem_qc", "seed_id",
+        "gold_label", "challenge_subtype", "external_source",
+        "external_source_url", "official_list_hit", "live_pubchem_qc", "seed_id",
     ]].copy()
     manifest.insert(1, "category", "CHEMICAL_GROUP")
     write_csv(manifest, SOURCES / "chemical_group_source_manifest.csv")
 
-    unresolved = int((approved["live_pubchem_qc"] == "UNRESOLVED_NONBLOCKING").sum())
+    unresolved = int(
+        (approved["live_pubchem_qc"] == "UNRESOLVED_NONBLOCKING").sum()
+    )
     print(f"[OK] Chemical-group approved cases: {len(approved)}")
     print(f"[QC] Frozen closed-registry rows: {n_official}")
-    print(f"[QC] Open-set official_list_hit=NO: {(approved['official_list_hit'] == 'NO').sum()}/{len(approved)}")
+    print(f"[QC] Rule distribution: {approved['target_rule_id'].value_counts().to_dict()}")
+    print(f"[QC] Label distribution: {approved['gold_label'].value_counts().to_dict()}")
+    print(f"[QC] Challenge subtypes: {approved['challenge_subtype'].value_counts().to_dict()}")
     print(f"[QC] PubChem live unresolved (non-blocking): {unresolved}/{len(approved)}")
-    print("[QC] PubChem lookup routes:")
-    print(approved["pubchem_lookup_route"].value_counts(dropna=False).to_string())
     print(f"[OUT] {AUDIT}")
     print(f"[OUT] {ip}")
     print(f"[OUT] {gp}")
