@@ -145,18 +145,22 @@ def catalog_payload(catalog: pd.DataFrame, smap: dict) -> list[dict]:
         if refs:
             entry["reference_substances"] = [cas_record(c, smap) for c in refs]
         # The Hybrid gate applies this frozen target-level rule, so the LLM must
-        # see the same (normalized) rule; otherwise the systems judge different scopes.
+        # see the same normalized rule; otherwise the systems judge different scopes.
         iso = clean(getattr(r, "isomer_scope", ""))
         if iso:
             entry["isomer_scope"] = parent_engine().normalize_isomer_scope(iso)
         members = split_cas(getattr(r, "official_member_cas_set", ""))
         if members:
             entry["official_enumerated_members"] = [cas_record(c, smap) for c in members]
+        mix_cas = split_cas(getattr(r, "official_mixture_cas", ""))
         comps = split_cas(getattr(r, "mixture_component_cas_set", ""))
-        if comps:
-            entry["mixture_identity"] = {
-                "component_cas": [cas_record(c, smap) for c in comps]
-            }
+        if mix_cas or comps:
+            mix = {}
+            if mix_cas:
+                mix["mixture_cas"] = [cas_record(c, smap) for c in mix_cas]
+            if comps:
+                mix["component_cas"] = [cas_record(c, smap) for c in comps]
+            entry["mixture_identity"] = mix
         entries.append(entry)
     return entries
 
@@ -204,6 +208,8 @@ def gate_query(row: pd.Series, catalog: pd.DataFrame, smap: dict) -> dict:
         if cas in split_cas(getattr(r, "reference_cas_set", "")):
             exact_hits.append(tid)
         if cas in split_cas(getattr(r, "official_member_cas_set", "")):
+            exact_hits.append(tid)
+        if cas in split_cas(getattr(r, "official_mixture_cas", "")):
             exact_hits.append(tid)
     exact_hits = sorted(set(exact_hits))
     if len(exact_hits) == 1:
