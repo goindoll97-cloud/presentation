@@ -47,7 +47,9 @@ N_REPEATS = max(1, int(os.getenv("RETRIEVAL_LLM_REPEATS", os.getenv("IDENTITY_LL
 TIMEOUT = max(30, int(os.getenv("RETRIEVAL_ANTHROPIC_TIMEOUT", "180")))
 MAX_TOKENS = max(256, int(os.getenv("RETRIEVAL_ANTHROPIC_MAX_TOKENS", "700")))
 EFFORT = os.getenv("RETRIEVAL_ANTHROPIC_EFFORT", "medium").strip().lower() or "medium"
-TEMPERATURE = float(os.getenv("RETRIEVAL_TEMPERATURE", "0"))
+# Claude Sonnet 5 rejects non-default sampling parameters. Do not send
+# temperature/top_p/top_k; use the model default sampling configuration.
+SAMPLING_MODE = "MODEL_DEFAULT_NO_TEMPERATURE_PARAMETER"
 FORCE = os.getenv("RETRIEVAL_FORCE_LLM", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 PROMPT_VERSION = "study2-retrieval-cas-smiles-v1-20261001"
@@ -116,7 +118,7 @@ def prompt_hash(prompt: str) -> str:
 def cache_path(query_id: str, condition: str, repeat: int, prompt: str) -> Path:
     payload = "|".join([
         PROMPT_VERSION, MODEL, condition, str(repeat), query_id,
-        prompt_hash(prompt), EFFORT, str(MAX_TOKENS), str(TEMPERATURE),
+        prompt_hash(prompt), EFFORT, str(MAX_TOKENS), SAMPLING_MODE,
     ])
     key = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
     d = CACHE_DIR / re.sub(r"[^A-Za-z0-9._-]+", "_", MODEL) / condition.lower()
@@ -136,7 +138,6 @@ def call_anthropic(query_id: str, prompt: str) -> dict:
     body = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "temperature": TEMPERATURE,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
         "thinking": {"type": "disabled"},
