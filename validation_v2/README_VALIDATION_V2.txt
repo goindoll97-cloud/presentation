@@ -12,10 +12,11 @@ The benchmark is separated into three chemical-scope categories:
 2) CHEMICAL_GROUP
    Generic chemical-group scopes. This subset includes candidates that are NOT
    directly enumerated under the target rule's frozen closed-registry CAS list,
-   but whose chemical identity can be supported by an external database.
+   but whose chemical identity can be supported by external chemical databases.
 
 3) MIXTURE
-   Named mixtures/compositions, including CAS-less regulatory mixture identities.
+   Named mixtures/compositions, including CAS-less regulatory/assessment mixture
+   identities.
 
 Critical anti-leakage rule
 --------------------------
@@ -38,9 +39,10 @@ validation_v2/
   seeds/
     chemical_group_candidates_seed.csv
     mixture_candidates_seed.csv
+    mixture_candidates_seed_additional.csv
   data/       # generated validation files
   sources/    # generated source manifests / summaries
-  cache/      # local retrieval cache if later added
+  cache/
 
 Parent/Salt subset
 ------------------
@@ -76,28 +78,30 @@ opinion for every real-world regulatory application.
 
 Mixture subset
 --------------
-Current curated seed: n = 20 (MATCH 10 / NO_MATCH 10), representing 10 unique
-named mixture identities from the K-REACH classification/labeling list.
+Current curated seed: n = 30 (MATCH 15 / NO_MATCH 15), representing 15 unique
+named mixture identities.
 
-Examples include:
-- Mixture of methylsilanetriol triphosphate and phosphoric acid (CAS-less mixture)
-- a four-component acrylate mixture
-- phosphine-oxide mixtures
-- isomeric ketone / ester / amine mixture identities
+The first 10 unique target identities are anchored to the K-REACH Chemical
+Information Processing System classification/labeling list. Five additional
+CAS-unassigned mixture identities (2017-886, 2017-887, 2017-890, 2017-891,
+2017-892) are anchored to archived NIER hazard-assessment-result records.
 
-For each of the 10 target mixture identities, the seed contains:
+For each target mixture identity, the benchmark contains:
 - one exact-composition MATCH;
-- one cross-mixture NO_MATCH using another real K-REACH mixture as a hard negative.
+- one cross-mixture NO_MATCH using another real named mixture as a hard negative.
 
-Thus n=20 should not be interpreted as 20 independent mixture identities; the
-current effective unique-mixture count is 10. Future expansion should increase
-unique mixture identities rather than only adding more cross-pair rows.
+No reaction-mixture/reaction-product entries were added in this expansion. They
+remain outside the current three-category benchmark and can be studied later as
+a separate category.
 
-Source
-------
-Mixture identities are anchored to the K-REACH Chemical Information Processing
-System classification/labeling PDF:
+Sources
+-------
+K-REACH classification/labeling PDF:
 https://kreach.me.go.kr/repwrt/ghs/ghsClassLabeling/ghsPdf.do
+
+Archived NIER hazard-assessment-result PDF mirror used for the five additional
+CAS-unassigned identities:
+https://resource.chemlinked.com.cn/old/cdn/img/newcl/file/hazard_evaluation_reusults.pdf
 
 Recommended execution
 ---------------------
@@ -109,13 +113,21 @@ From the repository root:
   python 03_build_mixture_validation.py
   python 04_merge_validation_master.py
 
-Default final-freeze minimums:
-  PARENT_SALT    >= 72
-  CHEMICAL_GROUP >= 20
-  MIXTURE        >= 20
+Default final-freeze requirements:
+  PARENT_SALT    >= 72 rows
+  CHEMICAL_GROUP >= 20 rows
+  MIXTURE        >= 20 rows
+  unique MIXTURE target identities >= 15
+  unique CHEMICAL_GROUP target rules >= 3
 
 Final freeze:
   python 05_freeze_validation_v2.py
+
+Expected current category sizes after rebuilding:
+  PARENT_SALT       72
+  CHEMICAL_GROUP    30
+  MIXTURE           30
+  TOTAL            132
 
 Generated files
 ---------------
