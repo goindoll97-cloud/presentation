@@ -3,6 +3,11 @@
 
 This freezes the retrieval transformation itself, not the later LLM/Hybrid
 prompt or runner code. The original Validation V2 freeze remains untouched.
+
+A documented CAS-normalization step is run after derivation and before audit.
+This preserves the original frozen source while allowing a source CAS
+transcription inconsistency to be corrected transparently in the derived
+retrieval representation.
 """
 from __future__ import annotations
 
@@ -20,10 +25,12 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 DATA = ROOT / "data"
 BUILDER = ROOT / "00_build_retrieval_benchmark.py"
+CORRECTOR = ROOT / "00a_apply_cas_corrections.py"
 CATALOG = DATA / "regulatory_catalog.csv"
 QINPUT = DATA / "retrieval_INPUT.csv"
 QGOLD = DATA / "retrieval_GOLD.csv"
 EXCLUDED = DATA / "retrieval_EXCLUDED_NO_CAS.csv"
+CORRECTION_AUDIT = DATA / "retrieval_CAS_CORRECTIONS.csv"
 MANIFEST = DATA / "retrieval_build_manifest.json"
 VAL_FREEZE = REPO_ROOT / "validation_v2" / "VALIDATION_V2_FREEZE.json"
 OUT = ROOT / "RETRIEVAL_DATASET_FREEZE.json"
@@ -46,9 +53,15 @@ def valid_cas_checksum(cas: str) -> bool:
 
 
 def main() -> None:
+    # Re-derive from the unchanged frozen Validation V2 source, then apply only
+    # the explicitly documented retrieval-side CAS normalization.
     subprocess.run([sys.executable, str(BUILDER)], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(CORRECTOR)], cwd=ROOT, check=True)
 
-    for p in [CATALOG, QINPUT, QGOLD, EXCLUDED, MANIFEST, VAL_FREEZE]:
+    for p in [
+        CATALOG, QINPUT, QGOLD, EXCLUDED, CORRECTION_AUDIT,
+        MANIFEST, VAL_FREEZE,
+    ]:
         if not p.exists():
             raise FileNotFoundError(p)
 
@@ -56,6 +69,7 @@ def main() -> None:
     qgold = pd.read_csv(QGOLD, dtype=str).fillna("")
     catalog = pd.read_csv(CATALOG, dtype=str).fillna("")
     excluded = pd.read_csv(EXCLUDED, dtype=str).fillna("")
+    corrections = pd.read_csv(CORRECTION_AUDIT, dtype=str).fillna("")
     build = json.loads(MANIFEST.read_text(encoding="utf-8"))
     validation_freeze = json.loads(VAL_FREEZE.read_text(encoding="utf-8"))
 
@@ -90,6 +104,24 @@ def main() -> None:
             bad_cas.append({"query_id": r.query_id, "cas_inputs": r.cas_inputs})
     add("all_query_cas_checksum_valid", not bad_cas, bad_cas[:10])
 
+    # The known source inconsistency must be explicitly documented rather than
+    # silently repaired.  The original Validation V2 remains frozen unchanged.
+    correction_ok = (
+        len(corrections) > 0
+        and (corrections["original_cas"] == "3084-48-0").any()
+        and (corrections["corrected_cas"] == "3084-48-8").any()
+    )
+    add(
+        "documented_source_cas_correction_applied",
+        correction_ok,
+        corrections[["location", "record_id", "original_cas", "corrected_cas"]].to_dict("records")[:10],
+    )
+    add(
+        "corrected_trihexylphosphine_cas_valid",
+        valid_cas_checksum("3084-48-8"),
+        "3084-48-8",
+    )
+
     allowed_gold = set(catalog["target_id"]) | {"NOT_FOUND"}
     invalid_targets = sorted(set(qgold["gold_target_id"]) - allowed_gold)
     add("gold_targets_exist_in_catalog_or_not_found", not invalid_targets, invalid_targets)
@@ -119,7 +151,7 @@ def main() -> None:
         raise RuntimeError(f"Retrieval dataset audit failed: {n_fail} FAIL item(s)")
 
     freeze = {
-        "protocol": "STUDY2_RETRIEVAL_DATASET_V1",
+        "protocol": "STUDY2_RETRIEVAL_DATASET_V1_1",
         "frozen_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_validation_protocol": validation_freeze.get("protocol"),
         "source_validation_frozen_at_utc": validation_freeze.get("frozen_at_utc"),
@@ -156,14 +188,18 @@ def main() -> None:
             "PubChem names, titles, synonyms, classifications, and regulatory annotations "
             "must not be exposed to the evaluated systems."
         ),
+        "cas_normalization_policy": build.get("cas_correction_policy", ""),
+        "cas_corrections": build.get("cas_corrections", []),
         "checks": checks,
         "sha256": {
             "00_build_retrieval_benchmark.py": sha256(BUILDER),
+            "00a_apply_cas_corrections.py": sha256(CORRECTOR),
             "retrieval_build_manifest.json": sha256(MANIFEST),
             "regulatory_catalog.csv": sha256(CATALOG),
             "retrieval_INPUT.csv": sha256(QINPUT),
             "retrieval_GOLD.csv": sha256(QGOLD),
             "retrieval_EXCLUDED_NO_CAS.csv": sha256(EXCLUDED),
+            "retrieval_CAS_CORRECTIONS.csv": sha256(CORRECTION_AUDIT),
             "../validation_v2/VALIDATION_V2_FREEZE.json": sha256(VAL_FREEZE),
         },
     }
