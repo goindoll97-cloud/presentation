@@ -48,8 +48,9 @@ def exact_catalog_hits(signature: str, catalog: pd.DataFrame) -> str:
         tid = clean(r.target_id)
         refs = split_set(getattr(r, "reference_cas_set", ""))
         members = split_set(getattr(r, "official_member_cas_set", ""))
+        mix_cas = split_set(getattr(r, "official_mixture_cas", ""))
         comps = split_set(getattr(r, "mixture_component_cas_set", ""))
-        if len(q) == 1 and (q & refs or q & members):
+        if len(q) == 1 and (q & refs or q & members or q & mix_cas):
             hits.append(tid)
         if len(q) > 1 and comps and q == comps:
             hits.append(tid)
