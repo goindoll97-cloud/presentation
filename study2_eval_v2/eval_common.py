@@ -24,6 +24,7 @@ RETRIEVAL_FREEZE = ROOT / "RETRIEVAL_DATASET_FREEZE.json"
 PUBCHEM_FREEZE = ROOT / "SHARED_PUBCHEM_FREEZE.json"
 SHARED_SMILES = INTER / "shared_pubchem_smiles.csv"
 PARENT_ENGINE = REPO_ROOT / "cheminformatics_identity_V5_FAIR.py"
+_PARENT_ENGINE_CACHE = None
 
 
 def clean(x) -> str:
@@ -55,6 +56,39 @@ def load_module(path: Path, name: str):
     return mod
 
 
+def parent_engine():
+    global _PARENT_ENGINE_CACHE
+    if not PARENT_ENGINE.exists():
+        raise RuntimeError(f"Required Hybrid parent/salt engine is missing: {PARENT_ENGINE}")
+    if _PARENT_ENGINE_CACHE is None:
+        _PARENT_ENGINE_CACHE = load_module(PARENT_ENGINE, "study2_retrieval_parent_engine")
+    return _PARENT_ENGINE_CACHE
+
+
+def parent_engine_runtime_info() -> dict:
+    engine = parent_engine()
+    try:
+        import rdkit
+        rdkit_version = clean(getattr(rdkit, "__version__", "")) or "UNKNOWN"
+    except Exception as exc:
+        raise RuntimeError("RDKit is required for the Hybrid parent/salt gate") from exc
+    if getattr(engine, "Chem", None) is None:
+        raise RuntimeError("Hybrid parent/salt engine loaded without RDKit support")
+    tests = engine.generic_self_tests()
+    failed = [r for r in tests if not bool(r.get("pass"))]
+    if failed:
+        raise RuntimeError(f"Hybrid parent/salt engine self-test failed: {failed}")
+    return {
+        "parent_engine_path": str(PARENT_ENGINE),
+        "parent_engine_sha256": sha256(PARENT_ENGINE),
+        "engine_version": clean(getattr(engine, "ENGINE_VERSION", "")),
+        "policy_version": clean(getattr(engine, "POLICY_VERSION", "")),
+        "rdkit_version": rdkit_version,
+        "self_test_n": len(tests),
+        "self_test_passed": len(tests),
+    }
+
+
 def verify_frozen_inputs() -> dict:
     for p in [QINPUT, CATALOG_FILE, RETRIEVAL_FREEZE, PUBCHEM_FREEZE, SHARED_SMILES]:
         if not p.exists():
@@ -62,7 +96,6 @@ def verify_frozen_inputs() -> dict:
 
     rf = json.loads(RETRIEVAL_FREEZE.read_text(encoding="utf-8"))
     pf = json.loads(PUBCHEM_FREEZE.read_text(encoding="utf-8"))
-
     rsha = rf.get("sha256", {})
     psha = pf.get("sha256", {})
     checks = {
@@ -83,10 +116,7 @@ def load_inputs():
     catalog = pd.read_csv(CATALOG_FILE, dtype=str).fillna("")
     structures = pd.read_csv(SHARED_SMILES, dtype=str).fillna("")
     smap = {
-        clean(r.cas): {
-            "smiles": clean(r.smiles),
-            "structure_status": clean(r.structure_status),
-        }
+        clean(r.cas): {"smiles": clean(r.smiles), "structure_status": clean(r.structure_status)}
         for r in structures.itertuples(index=False)
     }
     return qin, catalog, smap, checks
@@ -94,47 +124,34 @@ def load_inputs():
 
 def cas_record(cas: str, smap: dict) -> dict:
     rec = smap.get(clean(cas), {})
-    return {
-        "cas": clean(cas),
-        "smiles": clean(rec.get("smiles")),
-    }
+    return {"cas": clean(cas), "smiles": clean(rec.get("smiles"))}
 
 
 def query_payload(row: pd.Series, smap: dict) -> dict:
-    cas_list = split_cas(row.get("cas_inputs"))
     return {
         "query_id": clean(row.get("query_id")),
-        "candidate": [cas_record(c, smap) for c in cas_list],
+        "candidate": [cas_record(c, smap) for c in split_cas(row.get("cas_inputs"))],
     }
 
 
 def catalog_payload(catalog: pd.DataFrame, smap: dict) -> list[dict]:
     entries = []
     for r in catalog.itertuples(index=False):
-        target_id = clean(r.target_id)
         entry = {
-            "target_id": target_id,
+            "target_id": clean(r.target_id),
             "regulatory_scope": clean(r.regulatory_scope_text),
         }
-
         refs = split_cas(getattr(r, "reference_cas_set", ""))
         if refs:
             entry["reference_substances"] = [cas_record(c, smap) for c in refs]
-
         members = split_cas(getattr(r, "official_member_cas_set", ""))
         if members:
             entry["official_enumerated_members"] = [cas_record(c, smap) for c in members]
-
-        mix_cas = split_cas(getattr(r, "official_mixture_cas", ""))
         comps = split_cas(getattr(r, "mixture_component_cas_set", ""))
-        if mix_cas or comps:
-            mix = {}
-            if mix_cas:
-                mix["mixture_cas"] = [cas_record(c, smap) for c in mix_cas]
-            if comps:
-                mix["component_cas"] = [cas_record(c, smap) for c in comps]
-            entry["mixture_identity"] = mix
-
+        if comps:
+            entry["mixture_identity"] = {
+                "component_cas": [cas_record(c, smap) for c in comps]
+            }
         entries.append(entry)
     return entries
 
@@ -144,9 +161,9 @@ def build_prompt(row: pd.Series, catalog: pd.DataFrame, smap: dict) -> str:
         "candidate_query": query_payload(row, smap),
         "regulatory_catalog": catalog_payload(catalog, smap),
         "task": (
-            "Search the entire regulatory catalog. Return the one target_id that the "
-            "candidate belongs to. If none applies, return NOT_FOUND. If the supplied "
-            "CAS/SMILES information is insufficient to decide reliably, return REVIEW."
+            "Search the entire regulatory catalog. Return the one target_id that the candidate "
+            "belongs to. If none applies, return NOT_FOUND. If the supplied CAS/SMILES information "
+            "is insufficient to decide reliably, return REVIEW."
         ),
     }
     return "INPUT=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -166,26 +183,14 @@ def gate_query(row: pd.Series, catalog: pd.DataFrame, smap: dict) -> dict:
                 hits.append(clean(r.target_id))
         hits = sorted(set(hits))
         if len(hits) == 1:
-            return {
-                "query_id": qid,
-                "gate_status": "FOUND",
-                "gate_target_id": hits[0],
-                "gate_reason": "EXACT_MIXTURE_COMPONENT_CAS_SET",
-            }
-        return {
-            "query_id": qid,
-            "gate_status": "REVIEW",
-            "gate_target_id": "",
-            "gate_reason": "NO_UNIQUE_EXACT_MIXTURE_COMPONENT_SET",
-        }
+            return {"query_id": qid, "gate_status": "FOUND", "gate_target_id": hits[0],
+                    "gate_reason": "EXACT_MIXTURE_COMPONENT_CAS_SET"}
+        return {"query_id": qid, "gate_status": "REVIEW", "gate_target_id": "",
+                "gate_reason": "NO_UNIQUE_EXACT_MIXTURE_COMPONENT_SET"}
 
     if len(cas_list) != 1:
-        return {
-            "query_id": qid,
-            "gate_status": "REVIEW",
-            "gate_target_id": "",
-            "gate_reason": "CAS_INPUT_UNRESOLVED",
-        }
+        return {"query_id": qid, "gate_status": "REVIEW", "gate_target_id": "",
+                "gate_reason": "CAS_INPUT_UNRESOLVED"}
 
     cas = cas_list[0]
     exact_hits = []
@@ -195,28 +200,17 @@ def gate_query(row: pd.Series, catalog: pd.DataFrame, smap: dict) -> dict:
             exact_hits.append(tid)
         if cas in split_cas(getattr(r, "official_member_cas_set", "")):
             exact_hits.append(tid)
-        if cas in split_cas(getattr(r, "official_mixture_cas", "")):
-            exact_hits.append(tid)
-
     exact_hits = sorted(set(exact_hits))
     if len(exact_hits) == 1:
-        return {
-            "query_id": qid,
-            "gate_status": "FOUND",
-            "gate_target_id": exact_hits[0],
-            "gate_reason": "EXACT_CAS_IN_REGULATORY_CATALOG",
-        }
+        return {"query_id": qid, "gate_status": "FOUND", "gate_target_id": exact_hits[0],
+                "gate_reason": "EXACT_CAS_IN_REGULATORY_CATALOG"}
     if len(exact_hits) > 1:
-        return {
-            "query_id": qid,
-            "gate_status": "REVIEW",
-            "gate_target_id": "",
-            "gate_reason": "CAS_MAPS_TO_MULTIPLE_CATALOG_TARGETS",
-        }
+        return {"query_id": qid, "gate_status": "REVIEW", "gate_target_id": "",
+                "gate_reason": "CAS_MAPS_TO_MULTIPLE_CATALOG_TARGETS"}
 
     query_smiles = clean(smap.get(cas, {}).get("smiles"))
-    if query_smiles and PARENT_ENGINE.exists():
-        engine = load_module(PARENT_ENGINE, "study2_retrieval_parent_engine")
+    if query_smiles:
+        engine = parent_engine()  # hard failure if the required engine is unavailable
         match_hits = []
         for r in catalog[catalog["target_type"].eq("PARENT_SALT")].itertuples(index=False):
             refs = split_cas(getattr(r, "reference_cas_set", ""))
@@ -225,37 +219,24 @@ def gate_query(row: pd.Series, catalog: pd.DataFrame, smap: dict) -> dict:
             ref_smiles = clean(smap.get(refs[0], {}).get("smiles"))
             if not ref_smiles:
                 continue
-            try:
-                decision, _reason = engine.compare_salt_parent_v5(
-                    query_smiles, ref_smiles, "ALL_STEREOISOMERS"
-                )
-            except Exception:
-                continue
+            isomer_scope = clean(getattr(r, "isomer_scope", ""))
+            if not isomer_scope:
+                raise RuntimeError(f"Missing frozen isomer_scope for {clean(r.target_id)}")
+            decision, _reason = engine.compare_salt_parent_v5(
+                query_smiles, ref_smiles, isomer_scope
+            )
             if clean(decision).upper() == "MATCH":
                 match_hits.append(clean(r.target_id))
-
         match_hits = sorted(set(match_hits))
         if len(match_hits) == 1:
-            return {
-                "query_id": qid,
-                "gate_status": "FOUND",
-                "gate_target_id": match_hits[0],
-                "gate_reason": "UNIQUE_RDKIT_PARENT_SALT_MATCH",
-            }
+            return {"query_id": qid, "gate_status": "FOUND", "gate_target_id": match_hits[0],
+                    "gate_reason": "UNIQUE_RDKIT_PARENT_SALT_MATCH"}
         if len(match_hits) > 1:
-            return {
-                "query_id": qid,
-                "gate_status": "REVIEW",
-                "gate_target_id": "",
-                "gate_reason": "MULTIPLE_PARENT_SALT_STRUCTURE_MATCHES",
-            }
+            return {"query_id": qid, "gate_status": "REVIEW", "gate_target_id": "",
+                    "gate_reason": "MULTIPLE_PARENT_SALT_STRUCTURE_MATCHES"}
 
-    return {
-        "query_id": qid,
-        "gate_status": "REVIEW",
-        "gate_target_id": "",
-        "gate_reason": "NO_HIGH_CONFIDENCE_DETERMINISTIC_TARGET",
-    }
+    return {"query_id": qid, "gate_status": "REVIEW", "gate_target_id": "",
+            "gate_reason": "NO_HIGH_CONFIDENCE_DETERMINISTIC_TARGET"}
 
 
 def consensus_outcome(group: pd.DataFrame) -> tuple[str, str]:
