@@ -19,7 +19,7 @@ from validation_common import (
     DATA, SEEDS, SOURCES, pubchem_by_exact_cas,
     require_approved, split_input_gold, write_csv,
 )
-from regulatory_group_reference import OFFICIAL_GROUP_MEMBERS
+from regulatory_group_reference import OFFICIAL_CAS_BY_RULE
 
 SEED = SEEDS / "chemical_group_candidates_seed.csv"
 AUDIT = DATA / "chemical_group_candidates_enriched.csv"
@@ -41,10 +41,10 @@ def main() -> None:
 
     official_pairs = {
         (rule_id, cas)
-        for rule_id, members in OFFICIAL_GROUP_MEMBERS.items()
+        for rule_id, members in OFFICIAL_CAS_BY_RULE.items()
         for cas in members
     }
-    n_official = sum(len(v) for v in OFFICIAL_GROUP_MEMBERS.values())
+    n_official = sum(len(v) for v in OFFICIAL_CAS_BY_RULE.values())
 
     enriched_rows = []
     for i, r in seed.iterrows():
