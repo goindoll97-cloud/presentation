@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Freeze Validation V2 after all three category datasets are curated.
 
-By default this script refuses to freeze a paper-facing benchmark when the new
-CHEMICAL_GROUP or MIXTURE subsets contain fewer than 20 approved cases. For
-pipeline testing only, set VALIDATION_V2_ALLOW_SMALL_FREEZE=1.
+Paper-facing freeze requirements intentionally check both row counts and dataset
+DIVERSITY. In particular, mixture cross-pairing must not inflate the apparent
+sample size: at least 15 unique target mixture identities are required.
 """
 from __future__ import annotations
 
@@ -13,13 +13,16 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from validation_common import DATA, ROOT, SEEDS, SOURCES, sha256
+from validation_common import DATA, ROOT, SEEDS, sha256
 
 ALLOW_SMALL = os.getenv("VALIDATION_V2_ALLOW_SMALL_FREEZE", "0").strip().lower() in {"1", "true", "yes", "on"}
 MIN_COUNTS = {"PARENT_SALT": 72, "CHEMICAL_GROUP": 20, "MIXTURE": 20}
+MIN_UNIQUE_MIXTURE_TARGETS = 15
+MIN_CHEMICAL_GROUP_RULES = 3
 
 FILES = [
     ROOT / "validation_common.py",
+    ROOT / "regulatory_group_reference.py",
     ROOT / "01_build_parent_salt_validation.py",
     ROOT / "02_build_chemical_group_validation.py",
     ROOT / "03_build_mixture_validation.py",
@@ -51,11 +54,24 @@ def main() -> None:
 
     counts = gold["category"].value_counts().to_dict()
     too_small = {k: (int(counts.get(k, 0)), v) for k, v in MIN_COUNTS.items() if int(counts.get(k, 0)) < v}
-    if too_small and not ALLOW_SMALL:
+
+    mix_inp = inp[inp["category"].eq("MIXTURE")].copy()
+    grp_inp = inp[inp["category"].eq("CHEMICAL_GROUP")].copy()
+    unique_mix_targets = int(mix_inp["target_scope_id"].nunique()) if "target_scope_id" in mix_inp.columns else 0
+    unique_group_rules = int(grp_inp["target_rule_id"].nunique()) if "target_rule_id" in grp_inp.columns else 0
+
+    diversity_failures = {}
+    if unique_mix_targets < MIN_UNIQUE_MIXTURE_TARGETS:
+        diversity_failures["unique_mixture_targets"] = (unique_mix_targets, MIN_UNIQUE_MIXTURE_TARGETS)
+    if unique_group_rules < MIN_CHEMICAL_GROUP_RULES:
+        diversity_failures["chemical_group_rules"] = (unique_group_rules, MIN_CHEMICAL_GROUP_RULES)
+
+    if (too_small or diversity_failures) and not ALLOW_SMALL:
         raise RuntimeError(
-            "Validation V2 is not large enough for final freeze. "
-            f"Observed/minimum={too_small}. Expand curated seeds first. "
-            "For development testing only, set VALIDATION_V2_ALLOW_SMALL_FREEZE=1."
+            "Validation V2 is not ready for final paper-facing freeze. "
+            f"row_count_failures={too_small}; diversity_failures={diversity_failures}. "
+            "Expand curated seeds first. For development testing only, set "
+            "VALIDATION_V2_ALLOW_SMALL_FREEZE=1."
         )
 
     labels = gold["gold_label"].value_counts().to_dict()
@@ -67,10 +83,17 @@ def main() -> None:
         "category_counts": {k: int(v) for k, v in counts.items()},
         "label_counts": {k: int(v) for k, v in labels.items()},
         "minimum_category_counts": MIN_COUNTS,
+        "diversity": {
+            "unique_mixture_targets": unique_mix_targets,
+            "minimum_unique_mixture_targets": MIN_UNIQUE_MIXTURE_TARGETS,
+            "chemical_group_rules": unique_group_rules,
+            "minimum_chemical_group_rules": MIN_CHEMICAL_GROUP_RULES,
+        },
         "design_notes": {
             "PARENT_SALT": "Controlled carry-over from V6; not an independent holdout.",
-            "CHEMICAL_GROUP": "External-DB open-set candidates; official-list exact hits excluded from starter MATCH cases.",
-            "MIXTURE": "Real named mixture records, including CAS-less mixture identities and composition hard negatives.",
+            "CHEMICAL_GROUP": "External-DB open-set candidates; exact target-rule CAS hits excluded from MATCH seed cases.",
+            "MIXTURE": "Real named K-REACH mixture records with exact-composition matches and cross-mixture hard negatives.",
+            "mixture_effective_n": "Report unique mixture identities separately from pairwise case rows.",
             "leakage_control": "INPUT and GOLD files are physically separated before evaluation.",
         },
         "sha256": {str(p.relative_to(ROOT)).replace("\\", "/"): sha256(p) for p in FILES},
