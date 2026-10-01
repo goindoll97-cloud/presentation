@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Build real-mixture validation data from curated external-source records.
+"""Build real named-mixture validation data from curated external-source records.
 
-The mixture subset is identity/composition oriented. It supports CAS-less
-mixtures and explicit component lists. Multiple curated seed files can be kept
-separately for provenance; all files matching mixture_candidates_seed*.csv are
-combined deterministically before INPUT/GOLD export.
+The MIXTURE subset is intentionally limited to named/compositional mixtures.
+Reaction mixtures and reaction products are out of scope for this benchmark and
+must be evaluated separately because identity semantics differ.
 """
 from __future__ import annotations
+
+import re
 
 import pandas as pd
 
@@ -14,6 +15,19 @@ from validation_common import DATA, SEEDS, SOURCES, require_approved, split_inpu
 
 SEED_GLOB = "mixture_candidates_seed*.csv"
 AUDIT = DATA / "mixture_candidates_curated.csv"
+
+# Source re-review on 2026-10-01 established that 2021-1-1059 is explicitly
+# designated as a "Reaction mixture" in the official toxic-substance appendix.
+# It therefore remains in the historical seed file for provenance but is excluded
+# from this NAMED_MIXTURE benchmark. Replacement target 2023-1-1162 is supplied in
+# mixture_candidates_seed_replacement_2023.csv.
+EXCLUDED_REACTION_SCOPE_IDS = {
+    "2021-1-1059": "Official source explicitly classifies the target as Reaction mixture",
+}
+REACTION_TEXT_RE = re.compile(
+    r"reaction\s+(?:mixture|product)|반응\s*(?:혼합물|생성물)",
+    flags=re.IGNORECASE,
+)
 
 
 def _norm_parts(x: str) -> list[str]:
@@ -44,6 +58,25 @@ def main() -> None:
         dup = seed.loc[seed["seed_id"].duplicated(keep=False), "seed_id"].tolist()
         raise ValueError(f"Duplicate mixture seed_id across seed files: {dup}")
 
+    excluded_mask = seed["target_scope_id"].isin(EXCLUDED_REACTION_SCOPE_IDS)
+    excluded = seed.loc[excluded_mask].copy()
+    seed = seed.loc[~excluded_mask].copy().reset_index(drop=True)
+
+    # Defensive text-level gate. This catches future reaction-mixture/product rows
+    # when the curated regulatory text itself is correctly transcribed.
+    reaction_text_mask = seed["regulatory_scope_text"].astype(str).str.contains(
+        REACTION_TEXT_RE, na=False
+    )
+    if reaction_text_mask.any():
+        bad = seed.loc[
+            reaction_text_mask,
+            ["seed_id", "target_scope_id", "regulatory_scope_text"],
+        ].to_dict("records")
+        raise ValueError(
+            "Reaction mixture/product found in NAMED_MIXTURE benchmark seeds: "
+            f"{bad}"
+        )
+
     rows = []
     for i, r in seed.iterrows():
         row = r.to_dict()
@@ -52,10 +85,15 @@ def main() -> None:
         row.update({
             "case_id": f"MX-{i+1:03d}",
             "category": "MIXTURE",
+            "mixture_scope_kind": "NAMED_MIXTURE",
             "target_component_count": len(t),
             "candidate_component_count": len(c),
             "candidate_has_cas": "YES" if str(r["candidate_cas"]).strip() else "NO",
-            "component_set_exact": "YES" if set(x.lower() for x in t) == set(x.lower() for x in c) and t else "NO",
+            "component_set_exact": (
+                "YES"
+                if set(x.lower() for x in t) == set(x.lower() for x in c) and t
+                else "NO"
+            ),
         })
         rows.append(row)
     curated = pd.DataFrame(rows)
@@ -81,9 +119,9 @@ def main() -> None:
     ]
     gold_cols = [
         "case_id", "category", "gold_label", "gold_reason", "curation_status",
-        "target_components", "target_component_count", "candidate_component_count",
-        "candidate_has_cas", "component_set_exact", "external_source",
-        "external_source_url", "seed_id", "seed_file",
+        "mixture_scope_kind", "target_components", "target_component_count",
+        "candidate_component_count", "candidate_has_cas", "component_set_exact",
+        "external_source", "external_source_url", "seed_id", "seed_file",
     ]
     ip, gp = split_input_gold(approved, input_cols, gold_cols, "validation_mixture")
 
@@ -92,10 +130,14 @@ def main() -> None:
         "external_source", "external_source_url", "seed_id", "seed_file",
     ]].copy()
     manifest.insert(1, "category", "MIXTURE")
+    manifest.insert(2, "mixture_scope_kind", "NAMED_MIXTURE")
     write_csv(manifest, SOURCES / "mixture_source_manifest.csv")
 
     print(f"[OK] Mixture approved cases: {len(approved)}")
     print(f"[QC] Seed files: {len(seed_files)} ({', '.join(p.name for p in seed_files)})")
+    print(f"[QC] Excluded reaction-scope seed rows: {len(excluded)}")
+    if len(excluded):
+        print("[QC] Excluded target IDs: " + ", ".join(sorted(set(excluded["target_scope_id"]))))
     print(f"[QC] Unique target mixture identities: {approved['target_scope_id'].nunique()}")
     print(f"[QC] MATCH/NO_MATCH/REVIEW: {approved['gold_label'].value_counts().to_dict()}")
     print(f"[QC] CAS-less candidates: {(approved['candidate_has_cas'] == 'NO').sum()}/{len(approved)}")
